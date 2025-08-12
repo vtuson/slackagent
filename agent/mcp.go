@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log"
 	"os/exec"
 	"sync"
 
@@ -14,8 +15,10 @@ import (
 type MCPConnectionMethod string
 
 const (
-	// MethodRemote uses a local stdio proxy (npx mcp-remote) to connect to a remote MCP URL.
-	MethodRemote MCPConnectionMethod = "remote"
+	// MethodStreamable connects to a remote MCP server using the Streamable HTTP transport.
+	MethodStreamable MCPConnectionMethod = "streamable"
+	// MethodSSE connects to a remote MCP server using SSE transport.
+	MethodSSE MCPConnectionMethod = "sse"
 	// MethodSTDIO launches a local MCP server process and connects over stdio.
 	MethodSTDIO MCPConnectionMethod = "stdio"
 )
@@ -47,10 +50,11 @@ type MCPClient struct {
 // ConnectMCP connects to an MCP server using the provided options and returns a ready session.
 func ConnectMCP(ctx context.Context, opts MCPOptions) (*MCPClient, error) {
 	if opts.ImplementationName == "" {
-		opts.ImplementationName = "slackagent"
+		return nil, errors.New("implementation name is required")
 	}
 	if opts.ImplementationVersion == "" {
 		opts.ImplementationVersion = "v0.0.1"
+		log.Println("implementation version is empty, using default")
 	}
 
 	client := mcp.NewClient(&mcp.Implementation{
@@ -61,15 +65,16 @@ func ConnectMCP(ctx context.Context, opts MCPOptions) (*MCPClient, error) {
 	var transport mcp.Transport
 
 	switch opts.Method {
-	case MethodRemote:
+	case MethodStreamable:
 		if opts.URL == "" {
-			return nil, errors.New("remote method selected but URL is empty")
+			return nil, errors.New("streamable method selected but URL is empty")
 		}
-		// Use Notion’s recommended approach: a local stdio proxy via npx mcp-remote
-		// Ref: https://developers.notion.com/docs/get-started-with-mcp#connect-through-your-ai-tool
-		cmd := exec.Command("npx", append([]string{"-y", "mcp-remote", opts.URL}, opts.Args...)...)
-		transport = mcp.NewCommandTransport(cmd)
-
+		transport = mcp.NewStreamableClientTransport(opts.URL, nil)
+	case MethodSSE:
+		if opts.URL == "" {
+			return nil, errors.New("sse method selected but URL is empty")
+		}
+		transport = mcp.NewSSEClientTransport(opts.URL, nil)
 	case MethodSTDIO:
 		if opts.Command == "" {
 			return nil, errors.New("stdio method selected but Command is empty")
