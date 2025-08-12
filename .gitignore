@@ -1,0 +1,19 @@
+# macOS
+.DS_Store
+
+# Editors/IDE
+.idea/
+.vscode/
+
+# Go
+bin/
+vendor/
+coverage*
+
+# Env/Secrets
+.env
+*.local
+
+# Node (if any ancillary tooling)
+node_modules/
+

@@ -1,0 +1,28 @@
+# GPT Mediator Configuration
+
+mail:
+  # Gmail label to parse
+  label: "mediate"
+  # Max ID to parse
+  maxid: "NO_ID"
+  # Time to wait between parsing in minutes
+  wait: 15
+  # Path to the client secret file
+  secret: "client_secret.json"
+
+slack:
+  # Slack bot token (starts with xoxb-)
+  token: ""
+  
+  # Slack app-level token (starts with xapp-)
+  app_token: ""
+  
+  # Slack channel ID
+  channel: "C05RPHGAA9Y"
+
+gpt:
+  # OpenAI API Key
+  key: ""
+  
+  # OpenAI model to use
+  model: "gpt-3.5-turbo" 
