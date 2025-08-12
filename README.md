@@ -144,16 +144,24 @@ var cfg MyConfig
 _ = a.GetCustomConfig(&cfg)
 ```
 
-### Slack app setup (Socket Mode)
+### Slack bot configuration (api.slack.com)
 
-- Create a Slack app and enable **Socket Mode**
-- Install the app to your workspace and obtain:
-  - **Bot Token** (`xoxb-...`)
-  - **App-Level Token** with `connections:write` (`xapp-...`)
-- Add scopes: `app_mentions:read`, `channels:history`, `chat:write`, `im:history` (and others as needed)
-- Turn on Event Subscriptions and subscribe to at least:
-  - `app_mention`
-  - `message.channels` (and/or `message.im` depending on your use-case)
+- Create a new app in `api.slack.com/apps`
+- Create an **App-Level Token**, add scope `connections:write` and save the token (`xapp-...`)
+- Go to **Socket Mode** and enable it
+- Go to **OAuth & Permissions** and add the following OAuth scopes, then install the app to your workspace to obtain the **Bot Token** (`xoxb-...`)
+
+| OAuth Scope            | Description |
+|------------------------|-------------|
+| `app_mentions:read`    | View messages that directly mention the app in conversations the app is in |
+| `channels:history`     | View messages and other content in public channels the app has been added to |
+| `channels:read`        | View basic information about public channels in a workspace |
+| `chat:write`           | Send messages as the app |
+| `chat:write.customize` | Send messages as the app with a customized username and avatar |
+| `reactions:read`       | View emoji reactions and their associated content in channels and conversations the app has been added to |
+| `incoming-webhook`     | Post messages to specific channels in Slack |
+
+- Optional: Under **Event Subscriptions**, enable and subscribe to events you need (for this agent, at least `app_mention`; you may also use `message.channels`)
 - Put your default channel ID under `slack.channel` in `config.yaml`
 
 ### Gmail setup (optional)
