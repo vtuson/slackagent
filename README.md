@@ -161,7 +161,7 @@ _ = a.GetCustomConfig(&cfg)
 | `reactions:read`       | View emoji reactions and their associated content in channels and conversations the app has been added to |
 | `incoming-webhook`     | Post messages to specific channels in Slack |
 
-- Optional: Under **Event Subscriptions**, enable and subscribe to events you need (for this agent, at least `app_mention`; you may also use `message.channels`)
+- Under **Event Subscriptions**, enable and subscribe to events you need (for this agent, at least `app_mention`; you may also use `message.channels`)
 - Put your default channel ID under `slack.channel` in `config.yaml`
 
 ### Gmail setup (optional)
