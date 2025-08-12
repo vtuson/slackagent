@@ -9,10 +9,10 @@ import (
 	"syscall"
 	"time"
 
-	"bitbucket.org/vtuson/gptmediator/gpt"
-	"bitbucket.org/vtuson/gptmediator/mail"
-	"bitbucket.org/vtuson/gptmediator/slack"
 	"github.com/slack-go/slack/slackevents"
+	"github.com/vtuson/slackagent/gpt"
+	"github.com/vtuson/slackagent/mail"
+	"github.com/vtuson/slackagent/slack"
 
 	"gopkg.in/yaml.v2"
 )
