@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"net/http"
 	"os/exec"
 	"sync"
 
@@ -36,8 +37,9 @@ type MCPOptions struct {
 	URL string
 
 	// Local command and args (used when MethodSTDIO). Example: command="myserver", args=["--flag"]
-	Command string
-	Args    []string
+	Command    string
+	Args       []string
+	HTTPClient *http.Client
 }
 
 // MCPClient wraps an MCP client session and provides convenience helpers.
@@ -69,12 +71,16 @@ func ConnectMCP(ctx context.Context, opts MCPOptions) (*MCPClient, error) {
 		if opts.URL == "" {
 			return nil, errors.New("streamable method selected but URL is empty")
 		}
-		transport = mcp.NewStreamableClientTransport(opts.URL, nil)
+		transport = mcp.NewStreamableClientTransport(opts.URL, &mcp.StreamableClientTransportOptions{
+			HTTPClient: opts.HTTPClient,
+		})
 	case MethodSSE:
 		if opts.URL == "" {
 			return nil, errors.New("sse method selected but URL is empty")
 		}
-		transport = mcp.NewSSEClientTransport(opts.URL, nil)
+		transport = mcp.NewSSEClientTransport(opts.URL, &mcp.SSEClientTransportOptions{
+			HTTPClient: opts.HTTPClient,
+		})
 	case MethodSTDIO:
 		if opts.Command == "" {
 			return nil, errors.New("stdio method selected but Command is empty")
