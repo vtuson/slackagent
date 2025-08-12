@@ -41,7 +41,7 @@ go mod init example.com/my-slack-agent
 # If using locally, replace the module path to match your fork or add a replace directive.
 ```
 
-If you fork/rename this module, make sure your imports match your module path (imports in this repo currently point to `bitbucket.org/vtuson/gptmediator/...`). You can either keep that module path or update imports to your own module path.
+If you fork/rename this module, make sure your imports match your module path (examples below use `github.com/vtuson/slackagent/...`). You can either keep that module path or update imports to your own module path.
 
 2) Copy `config.yaml` and fill in secrets.
 
@@ -58,9 +58,9 @@ import (
     "log"
     "strings"
 
-    agt "bitbucket.org/vtuson/gptmediator/agent"
-    agtmail "bitbucket.org/vtuson/gptmediator/mail"
-    "bitbucket.org/vtuson/gptmediator/slack"
+    agt "github.com/vtuson/slackagent/agent"
+    agtmail "github.com/vtuson/slackagent/mail"
+    "github.com/vtuson/slackagent/slack"
     "github.com/slack-go/slack/slackevents"
 )
 
