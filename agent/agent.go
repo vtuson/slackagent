@@ -45,6 +45,7 @@ type Agent struct {
 	test           bool
 	EmailProcessor func(email mail.Email)
 	SlackProcessor func(event interface{})
+	MCPClient      *MCPClient
 }
 
 func (a *Agent) GetCustomConfig(customConfig interface{}) error {
