@@ -28,6 +28,11 @@ type GPTmessage struct {
 type OpenAI struct {
 	apiKey string
 	model  string
+	url    string
+}
+
+func (o *OpenAI) SetURL(url string) {
+	o.url = url
 }
 
 func GetDefaultModel() string {
@@ -79,7 +84,12 @@ func (o *OpenAI) gptSend(data map[string]interface{}) (string, error) {
 
 	jsonData, _ := json.Marshal(data)
 
-	req, err := http.NewRequest("POST", OPENAIURL, bytes.NewBuffer(jsonData))
+	url := o.url
+	if url == "" {
+		url = OPENAIURL
+	}
+
+	req, err := http.NewRequest("POST", url, bytes.NewBuffer(jsonData))
 	if err != nil {
 		fmt.Println("Failed to create API request " + err.Error())
 		return "", err
