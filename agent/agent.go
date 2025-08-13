@@ -92,10 +92,8 @@ func (a *Agent) LoadConfig(configPath string) error {
 	}
 
 	if config.GPT == nil {
-		log.Fatal("GPT configuration is required in config file")
-	}
-
-	if config.GPT.Key == "" {
+		log.Println("GPT configuration is not required in config file")
+	} else if config.GPT.Key == "" {
 		log.Fatal("OpenAI API Key is required in config file")
 	} else {
 		a.gptApiKey = config.GPT.Key
