@@ -65,14 +65,17 @@ func (n *NotionMCP) STDIO() (*MCPClient, error) {
 
 // requires npx in the system to work correctly
 func (n *NotionMCP) STDIOStreamable() (*MCPClient, error) {
+	headers := `{"Authorization":"Bearer ` + n.NotionKey + `","Notion-Version":"2022-06-28"}`
+	env := []string{"OPENAPI_MCP_HEADERS=" + headers}
 
 	mcpClient, err := ConnectMCP(context.Background(), MCPOptions{
 		ImplementationName:    n.ImplementationName,
 		ImplementationVersion: n.ImplementationVersion,
 		Method:                MethodSTDIO,
 		Command:               "npx",
-		Args:                  []string{"-y", "notionhq/notion-mcp-server", "--transport", "http", "--auth-token", n.NotionKey},
+		Args:                  []string{"-y", "@notionhq/notion-mcp-server", "--transport", "http"},
 		HTTPClient:            nil,
+		Env:                   env,
 	})
 
 	return mcpClient, err

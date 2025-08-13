@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"os"
 	"os/exec"
 	"sync"
 
@@ -39,6 +40,7 @@ type MCPOptions struct {
 	// Local command and args (used when MethodSTDIO). Example: command="myserver", args=["--flag"]
 	Command    string
 	Args       []string
+	Env        []string
 	HTTPClient *http.Client
 }
 
@@ -71,6 +73,7 @@ func ConnectMCP(ctx context.Context, opts MCPOptions) (*MCPClient, error) {
 		if opts.URL == "" {
 			return nil, errors.New("streamable method selected but URL is empty")
 		}
+		log.Printf("connecting to MCP server with URL: %s", opts.URL)
 		transport = mcp.NewStreamableClientTransport(opts.URL, &mcp.StreamableClientTransportOptions{
 			HTTPClient: opts.HTTPClient,
 		})
@@ -85,7 +88,13 @@ func ConnectMCP(ctx context.Context, opts MCPOptions) (*MCPClient, error) {
 		if opts.Command == "" {
 			return nil, errors.New("stdio method selected but Command is empty")
 		}
+		log.Printf("connecting to MCP server with command: %s and args: %v", opts.Command, opts.Args)
 		cmd := exec.Command(opts.Command, opts.Args...)
+		if opts.Env != nil {
+			for _, env := range opts.Env {
+				cmd.Env = append(os.Environ(), env)
+			}
+		}
 		transport = mcp.NewCommandTransport(cmd)
 
 	default:
