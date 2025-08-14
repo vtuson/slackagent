@@ -6,6 +6,7 @@ import (
 	"log"
 	"os"
 	"os/signal"
+	"regexp"
 	"strings"
 	"syscall"
 
@@ -112,7 +113,7 @@ func (c *Client) Start(Processor func(event interface{})) error {
 func (c *Client) SendMessage(msgText string) error {
 	_, _, err := c.api.PostMessage(
 		c.channelID,
-		slack.MsgOptionText(msgText, false),
+		slack.MsgOptionText(ToMrkdwn(msgText), false),
 	)
 	if err != nil {
 		return fmt.Errorf("error sending message: %v", err)
@@ -139,7 +140,7 @@ func (c *Client) SendTestMessage(testMessage string) bool {
 func (c *Client) PostInChannel(channel string, message string) (string, error) {
 	_, ts, err := c.api.PostMessage(
 		channel,
-		slack.MsgOptionText(message, false),
+		slack.MsgOptionText(ToMrkdwn(message), false),
 	)
 	if err != nil {
 		return "", fmt.Errorf("error sending message: %v", err)
@@ -151,7 +152,7 @@ func (c *Client) PostInChannel(channel string, message string) (string, error) {
 func (c *Client) PostInThread(channel string, message string, threadTimeStamp string) (string, error) {
 	_, ts, err := c.api.PostMessage(
 		channel,
-		slack.MsgOptionText(message, false),
+		slack.MsgOptionText(ToMrkdwn(message), false),
 		slack.MsgOptionTS(threadTimeStamp), // This makes it a thread reply
 	)
 	if err != nil {
@@ -201,4 +202,27 @@ func StripAtMention(text string) string {
 		return strings.TrimSpace(text[spaceIndex+1:])
 	}
 	return text
+}
+
+var (
+	reBold     = regexp.MustCompile(`\*\*(.+?)\*\*`)                    // **bold** -> *bold*
+	reLinkGH   = regexp.MustCompile(`\[(.+?)\]\((https?://[^\s)]+)\)`)  // [text](url) -> <url|text>
+	reHeading  = regexp.MustCompile(`(?m)^#{1,6}\s+(.+)$`)              // # H -> *H*
+	reImg      = regexp.MustCompile(`!\[(.*?)\]\((https?://[^\s)]+)\)`) // ![alt](url) -> <url|alt>
+	reCodeLang = regexp.MustCompile("(?s)```\\s*[a-zA-Z0-9_+-]+\\s*\n") // ```lang\n -> ```
+)
+
+func ToMrkdwn(s string) string {
+	// Convert GH constructs to Slack mrkdwn
+	s = reBold.ReplaceAllString(s, "*$1*")
+	s = reLinkGH.ReplaceAllString(s, "<$2|$1>")
+	s = reImg.ReplaceAllString(s, "<$2|$1>")
+	s = reHeading.ReplaceAllString(s, "*$1*")
+	// Remove language tags from fenced code (Slack ignores, but this is safer)
+	s = reCodeLang.ReplaceAllString(s, "```\n")
+	// Avoid wrapping the entire message in a single code block by mistake
+	if strings.HasPrefix(strings.TrimSpace(s), "```") && strings.HasSuffix(strings.TrimSpace(s), "```") {
+		// leave real code blocks alone; only strip if you intended rich text
+	}
+	return s
 }
