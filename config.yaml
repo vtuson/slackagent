@@ -1,8 +1,8 @@
-# GPT Mediator Configuration
+# Sample Configuration
 
 mail:
   # Gmail label to parse
-  label: "mediate"
+  label: "foo"
   # Max ID to parse
   maxid: "NO_ID"
   # Time to wait between parsing in minutes
