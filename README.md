@@ -10,7 +10,7 @@ You bring a small `main.go` that plugs in your business logic (Slack and/or Mail
 
 ### Features
 
-- **Socket Mode Slack client** with helpers to post to channels/threads, fetch thread replies, and basic text formatting
+- **Socket Mode Slack client** with helpers to post to channels/threads, fetch thread replies, post/remove reactions and basic text formatting
 - **Event filter** that forwards `app_mention` and plain `message` events for your processing
 - **OpenAI client** wrapper with a simple `GptQuery` API and sensible defaults
 - **Gmail** utilities for polling labeled messages and parsing bodies (plain and HTML)
