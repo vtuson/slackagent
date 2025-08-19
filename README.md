@@ -4,6 +4,7 @@ An opinionated Go scaffolding to build Slack agents powered by LLMs. It wires to
 
 - **Slack Socket Mode** event ingestion and posting utilities
 - **OpenAI Chat Completions** helper
+- **MCP** connection helper
 - Optional **Gmail** polling utilities for email-driven workflows
 
 You bring a small `main.go` that plugs in your business logic (Slack and/or Mail processors). This package provides the plumbing so you can focus on your agent behavior.
