@@ -14,11 +14,16 @@ You bring a small `main.go` that plugs in your business logic (Slack and/or Mail
 - **Event filter** that forwards `app_mention` and plain `message` events for your processing
 - **OpenAI client** wrapper with a simple `GptQuery` API and sensible defaults
 - **Gmail** utilities for polling labeled messages and parsing bodies (plain and HTML)
+- **MCP client** with support for Streamable, SSE, and STDIO transports for Model Context Protocol integration
+- **Notion MCP** integration with specialized client for Notion's MCP implementation
 - **YAML config** loader, including pass-through `agent_config` for your custom settings
 
 ### Repository layout
 
-- `agent/` — Core agent wiring: config loader, Slack client initialization, email loop, LLM factory
+- `agent/` — Core agent wiring: config loader, Slack client initialization, email loop, LLM factory, MCP integration
+  - `mcp.go` — Model Context Protocol client implementation with multiple transport options
+  - `notionmcp.go` — Specialized Notion MCP client implementation
+  - `headers.go` — HTTP header utilities for MCP clients
 - `slack/` — Slack client and helpers (`PostInChannel`, `PostInThread`, `GetThreadMessages`, `StripAtMention`, `AddText`)
 - `gpt/` — Minimal OpenAI Chat Completions helper
 - `mail/` — Gmail connection and parsing utils
@@ -131,6 +136,13 @@ gpt:
   key: "sk-..."           # OpenAI API Key
   model: "gpt-3.5-turbo"  # Model name
 
+mcp:
+  notion:
+    key: "secret_..."     # Notion API Key
+    impl_name: "my-app"   # Implementation name for MCP client
+    impl_version: "v1.0"  # Implementation version
+    url: ""              # Optional: custom MCP endpoint URL
+
 agent_config:              # Free-form config for your app
   my_setting: 123
   feature_flag: true
@@ -192,6 +204,17 @@ _ = a.GetCustomConfig(&cfg)
 
 - `mail` utilities
   - `Connect(secretPath, code)`; `GetEmails(...)`; `Email.Text()`; HTML/text decode helpers
+
+- `agent.MCPClient`
+  - `ConnectMCP(ctx, opts)` — Connect to an MCP server with various transport options
+  - `ListTools(ctx)` — List all available tools from the MCP server
+  - `CallTool(ctx, name, arguments)` — Call a specific tool with arguments
+  - `ExtractTextResponses(result)` — Helper to extract text responses from tool results
+
+- `agent.NotionMCP`
+  - `Streamable()` — Connect to Notion MCP using Streamable transport
+  - `STDIO()` — Connect to Notion MCP using STDIO transport
+  - `STDIOStreamable()` — Connect to Notion MCP using STDIO with Streamable transport
 
 ### Running locally
 
