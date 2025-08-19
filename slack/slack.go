@@ -185,6 +185,28 @@ func (c *Client) GetThreadMessages(channelID string, threadTS string) ([]slack.M
 	return replies, nil
 }
 
+func (c *Client) AddReaction(channel string, timestamp string, reaction string) error {
+	err := c.api.AddReaction(reaction, slack.ItemRef{
+		Channel:   channel,
+		Timestamp: timestamp,
+	})
+	if err != nil {
+		log.Printf("Failed to add reaction: %v", err)
+		return err
+	}
+	return nil
+}
+func (c *Client) RemoveReaction(channel string, timestamp string, reaction string) error {
+	err := c.api.RemoveReaction(reaction, slack.ItemRef{
+		Channel:   channel,
+		Timestamp: timestamp,
+	})
+	if err != nil {
+		return err
+	}
+	return nil
+}
+
 func StripAtMention(text string) string {
 	text = strings.TrimSpace(text)
 	if text == "" {
