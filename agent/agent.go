@@ -45,6 +45,7 @@ type Agent struct {
 	test           bool
 	EmailProcessor func(email mail.Email)
 	SlackProcessor func(event interface{})
+	MCPClient      *MCPClient
 }
 
 func (a *Agent) GetCustomConfig(customConfig interface{}) error {
@@ -91,10 +92,8 @@ func (a *Agent) LoadConfig(configPath string) error {
 	}
 
 	if config.GPT == nil {
-		log.Fatal("GPT configuration is required in config file")
-	}
-
-	if config.GPT.Key == "" {
+		log.Println("GPT configuration is not required in config file")
+	} else if config.GPT.Key == "" {
 		log.Fatal("OpenAI API Key is required in config file")
 	} else {
 		a.gptApiKey = config.GPT.Key
