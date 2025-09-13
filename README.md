@@ -4,6 +4,7 @@ An opinionated Go scaffolding to build Slack agents powered by LLMs. It wires to
 
 - **Slack Socket Mode** event ingestion and posting utilities
 - **OpenAI Chat Completions** helper
+- **MCP** connection helper
 - Optional **Gmail** polling utilities for email-driven workflows
 
 You bring a small `main.go` that plugs in your business logic (Slack and/or Mail processors). This package provides the plumbing so you can focus on your agent behavior.
@@ -182,39 +183,6 @@ _ = a.GetCustomConfig(&cfg)
 - Save it (e.g. `client_secret.json`), and configure `mail.secret`
 - First run without `mail.auth_token` prints an auth URL and exits; complete the flow and re-run with the code in `mail.auth_token` to cache the token. Subsequent runs can leave `auth_token` empty.
 - Configure `mail.label` to the Gmail label you want to poll. Use `a.SetTestMode(true)` to use label `test`.
-
-### Programmatic APIs
-
-- `agent.Agent`
-  - `LoadConfig(path string)` — read YAML
-  - `InitializeSlackClient()` — start Socket Mode client
-  - `GetSlackClient() *slack.Client` — access Slack helpers
-  - `HasEmail() bool` / `ProcessEmails()` — start Gmail polling loop
-  - `NewLLM() *gpt.OpenAI` — build LLM client with configured model/key
-  - `GetCustomConfig(out interface{}) error` — unmarshal `agent_config` into your struct
-
-- `slack.Client`
-  - `PostInChannel(channel, message)` and `PostInThread(channel, message, threadTS)`
-  - `GetThreadMessages(channel, threadTS)`
-  - `AddText(text, to, bold)` and `StripAtMention(text)`
-
-- `gpt.OpenAI`
-  - `SetApiKey`, `SetModel`
-  - `GptQuery(systemPrompt, message, context)` returns the assistant reply string
-
-- `mail` utilities
-  - `Connect(secretPath, code)`; `GetEmails(...)`; `Email.Text()`; HTML/text decode helpers
-
-- `agent.MCPClient`
-  - `ConnectMCP(ctx, opts)` — Connect to an MCP server with various transport options
-  - `ListTools(ctx)` — List all available tools from the MCP server
-  - `CallTool(ctx, name, arguments)` — Call a specific tool with arguments
-  - `ExtractTextResponses(result)` — Helper to extract text responses from tool results
-
-- `agent.NotionMCP`
-  - `Streamable()` — Connect to Notion MCP using Streamable transport
-  - `STDIO()` — Connect to Notion MCP using STDIO transport
-  - `STDIOStreamable()` — Connect to Notion MCP using STDIO with Streamable transport
 
 ### Running locally
 
