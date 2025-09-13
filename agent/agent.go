@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"errors"
 	"fmt"
 	"io/ioutil"
 	"log"
@@ -35,7 +36,7 @@ type Config struct {
 		Secret    string `yaml:"secret"`
 		AuthToken string `yaml:"auth_token,omitempty"`
 	} `yaml:"mail"`
-	AgentConfig interface{} `yaml:"agent_config"`
+	AgentConfig interface{} `yaml:"agent_config,omitempty"`
 }
 
 type Agent struct {
@@ -49,6 +50,9 @@ type Agent struct {
 }
 
 func (a *Agent) GetCustomConfig(customConfig interface{}) error {
+	if a.Config.AgentConfig == nil {
+		return errors.New("agent_config is not set")
+	}
 	data, err := yaml.Marshal(a.Config.AgentConfig.(map[interface{}]interface{}))
 	if err != nil {
 		return err
