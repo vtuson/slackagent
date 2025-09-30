@@ -73,7 +73,7 @@ func (n *NotionMCP) STDIOStreamable() (*MCPClient, error) {
 		ImplementationVersion: n.ImplementationVersion,
 		Method:                MethodSTDIO,
 		Command:               "npx",
-		Args:                  []string{"-y", "@notionhq/notion-mcp-server", "--transport", "http"},
+		Args:                  []string{"-y", "@notionhq/notion-mcp-server"},
 		HTTPClient:            nil,
 		Env:                   env,
 	})
