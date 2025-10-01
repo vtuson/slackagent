@@ -17,6 +17,7 @@ You bring a small `main.go` that plugs in your business logic (Slack and/or Mail
 - **Gmail** utilities for polling labeled messages and parsing bodies (plain and HTML)
 - **MCP client** with support for Streamable, SSE, and STDIO transports for Model Context Protocol integration
 - **Notion MCP** integration with specialized client for Notion's MCP implementation
+- **Embedding utilities** with support for local ONNX models and OpenAI embeddings for RAG systems
 - **YAML config** loader, including pass-through `agent_config` for your custom settings
 
 ### Repository layout
@@ -26,7 +27,8 @@ You bring a small `main.go` that plugs in your business logic (Slack and/or Mail
   - `notionmcp.go` — Specialized Notion MCP client implementation
   - `headers.go` — HTTP header utilities for MCP clients
 - `slack/` — Slack client and helpers (`PostInChannel`, `PostInThread`, `GetThreadMessages`, `StripAtMention`, `AddText`)
-- `gpt/` — Minimal OpenAI Chat Completions helper
+- `gpt/` — Minimal OpenAI Chat Completions helper (`GptQuery`, `GetEmbedding`, `GetEmbeddingsBatch`)
+- `embedding/` — Embedding generation and RAG utilities (local ONNX models and OpenAI embeddings)
 - `mail/` — Gmail connection and parsing utils
 - `config.yaml` — Example configuration
 
@@ -184,7 +186,17 @@ _ = a.GetCustomConfig(&cfg)
 - First run without `mail.auth_token` prints an auth URL and exits; complete the flow and re-run with the code in `mail.auth_token` to cache the token. Subsequent runs can leave `auth_token` empty.
 - Configure `mail.label` to the Gmail label you want to poll. Use `a.SetTestMode(true)` to use label `test`.
 
-### Running locally
+### Building
+
+If you're using the `embedding` package with ONNX models, you'll need the tokenizers library:
+
+```bash
+./build.sh
+```
+
+This script automatically downloads and builds the required `libtokenizers.a` library if not present.
+
+For standard builds without embeddings:
 
 ```bash
 go mod tidy

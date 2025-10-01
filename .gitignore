@@ -10,6 +10,10 @@ bin/
 vendor/
 coverage*
 
+# Build artifacts
+lib/
+*.a
+
 # Env/Secrets
 .env
 *.local
