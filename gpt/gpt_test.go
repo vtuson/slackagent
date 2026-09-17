@@ -112,3 +112,69 @@ func TestOpenAINoChoicesIsAnError(t *testing.T) {
 		t.Fatal("expected an error when the response has no choices, got nil")
 	}
 }
+
+func openAIStop(text, finishReason string) func(w http.ResponseWriter) {
+	return func(w http.ResponseWriter) {
+		w.Write([]byte(`{"choices":[{"index":0,"message":{"role":"assistant","content":"` +
+			text + `"},"finish_reason":"` + finishReason + `"}]}`))
+	}
+}
+
+func TestOpenAIQueryNormalisesStopReasons(t *testing.T) {
+	cases := []struct {
+		raw  string
+		want string
+	}{
+		{"stop", STOPEND},
+		{"length", STOPMAXTOKENS},
+		{"tool_calls", STOPTOOLUSE},
+		{"function_call", STOPTOOLUSE},
+		{"content_filter", STOPREFUSAL},
+		{"", STOPOTHER},
+	}
+
+	for _, c := range cases {
+		o, _, _ := newOpenAITestServer(t, openAIStop("text", c.raw))
+		resp, err := o.Query("sys", "hello", "")
+		if err != nil {
+			t.Fatalf("Query(%s) returned error: %v", c.raw, err)
+		}
+		if resp.StopReason != c.want {
+			t.Errorf("stop reason for %q = %q, want %q", c.raw, resp.StopReason, c.want)
+		}
+	}
+}
+
+// Both providers must report truncation the same way, so a caller's
+// continuation loop works regardless of which one is configured.
+func TestOpenAIReportsTruncation(t *testing.T) {
+	o, _, _ := newOpenAITestServer(t, openAIStop("cut off", "length"))
+
+	resp, err := o.Query("sys", "hello", "")
+	if err != nil {
+		t.Fatalf("Query returned error: %v", err)
+	}
+	if !resp.Truncated() {
+		t.Error("a length finish_reason must report Truncated() == true")
+	}
+}
+
+// OpenAI treats max_tokens as optional, so it is only sent when set.
+func TestOpenAIMaxTokensOptional(t *testing.T) {
+	o, body, _ := newOpenAITestServer(t, openAIOK("ok"))
+
+	if _, err := o.GptQuery("sys", "hello", ""); err != nil {
+		t.Fatalf("GptQuery returned error: %v", err)
+	}
+	if _, present := (*body)["max_tokens"]; present {
+		t.Error("max_tokens must be omitted when unset, to preserve existing behaviour")
+	}
+
+	o.SetMaxTokens(512)
+	if _, err := o.GptQuery("sys", "hello", ""); err != nil {
+		t.Fatalf("GptQuery returned error: %v", err)
+	}
+	if got := (*body)["max_tokens"]; got != float64(512) {
+		t.Errorf("max_tokens = %v, want 512", got)
+	}
+}

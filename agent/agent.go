@@ -26,9 +26,10 @@ type Config struct {
 		Channel  string `yaml:"channel"`
 	} `yaml:"slack"`
 	GPT *struct {
-		Key      string `yaml:"key"`
-		Model    string `yaml:"model"`
-		Provider string `yaml:"provider,omitempty"`
+		Key       string `yaml:"key"`
+		Model     string `yaml:"model"`
+		Provider  string `yaml:"provider,omitempty"`
+		MaxTokens int64  `yaml:"max_tokens,omitempty"`
 	} `yaml:"gpt"`
 	Mail *struct {
 		Label     string `yaml:"label"`
@@ -198,6 +199,11 @@ func (a *Agent) NewLLM() gpt.LLM {
 	llm, err := gpt.NewProvider(provider, a.Config.GPT.Key, a.Config.GPT.Model)
 	if err != nil {
 		log.Fatalf("Failed to create llm provider: %v", err)
+	}
+
+	// An unset max_tokens leaves each provider on its own default.
+	if a.Config.GPT.MaxTokens > 0 {
+		llm.SetMaxTokens(a.Config.GPT.MaxTokens)
 	}
 
 	return llm

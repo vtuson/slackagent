@@ -193,3 +193,150 @@ func TestClaudeUsesConfiguredModel(t *testing.T) {
 		t.Errorf("model = %v, want claude-haiku-4-5", got)
 	}
 }
+
+// stopReasonResponse returns a stub reply carrying a given stop reason.
+func stopReasonResponse(text, stopReason string) func(w http.ResponseWriter) {
+	return func(w http.ResponseWriter) {
+		w.Write([]byte(`{
+			"id": "msg_test",
+			"type": "message",
+			"role": "assistant",
+			"model": "claude-opus-5",
+			"content": [{"type": "text", "text": "` + text + `"}],
+			"stop_reason": "` + stopReason + `",
+			"usage": {"input_tokens": 10, "output_tokens": 5}
+		}`))
+	}
+}
+
+func TestClaudeQueryNormalisesStopReasons(t *testing.T) {
+	cases := []struct {
+		raw  string
+		want string
+	}{
+		{"end_turn", STOPEND},
+		{"stop_sequence", STOPEND},
+		{"max_tokens", STOPMAXTOKENS},
+		{"tool_use", STOPTOOLUSE},
+		{"refusal", STOPREFUSAL},
+		{"pause_turn", STOPOTHER},
+	}
+
+	for _, c := range cases {
+		claude, _, _ := newClaudeTestServer(t, stopReasonResponse("partial", c.raw))
+		resp, err := claude.Query("sys", "hello", "")
+		if err != nil {
+			t.Fatalf("Query(%s) returned error: %v", c.raw, err)
+		}
+		if resp.StopReason != c.want {
+			t.Errorf("stop reason for %q = %q, want %q", c.raw, resp.StopReason, c.want)
+		}
+		if resp.RawStopReason != c.raw {
+			t.Errorf("raw stop reason = %q, want %q", resp.RawStopReason, c.raw)
+		}
+	}
+}
+
+// Truncated is the signal a caller uses to ask for a continuation.
+func TestClaudeQueryReportsTruncation(t *testing.T) {
+	claude, _, _ := newClaudeTestServer(t, stopReasonResponse("cut off mid-", "max_tokens"))
+
+	resp, err := claude.Query("sys", "write an essay", "")
+	if err != nil {
+		t.Fatalf("Query returned error: %v", err)
+	}
+	if !resp.Truncated() {
+		t.Error("a max_tokens stop reason must report Truncated() == true")
+	}
+	if resp.Text != "cut off mid-" {
+		t.Errorf("truncated text should still be returned, got %q", resp.Text)
+	}
+
+	claude, _, _ = newClaudeTestServer(t, stopReasonResponse("all done", "end_turn"))
+	resp, _ = claude.Query("sys", "hi", "")
+	if resp.Truncated() {
+		t.Error("an end_turn stop reason must report Truncated() == false")
+	}
+}
+
+// A refusal is data on Query and an error on GptQuery.
+func TestClaudeQueryReturnsRefusalAsData(t *testing.T) {
+	refusal := func(w http.ResponseWriter) {
+		w.Write([]byte(`{
+			"id": "msg_test", "type": "message", "role": "assistant",
+			"model": "claude-opus-5", "content": [], "stop_reason": "refusal",
+			"stop_details": {"type": "refusal", "category": "cyber", "explanation": "declined"},
+			"usage": {"input_tokens": 10, "output_tokens": 0}
+		}`))
+	}
+
+	claude, _, _ := newClaudeTestServer(t, refusal)
+	resp, err := claude.Query("sys", "hello", "")
+	if err != nil {
+		t.Fatalf("Query should not error on a refusal: %v", err)
+	}
+	if resp.StopReason != STOPREFUSAL {
+		t.Errorf("stop reason = %q, want %q", resp.StopReason, STOPREFUSAL)
+	}
+	if resp.Detail != "declined" {
+		t.Errorf("Detail = %q, want the refusal explanation", resp.Detail)
+	}
+
+	claude, _, _ = newClaudeTestServer(t, refusal)
+	if _, err := claude.GptQuery("sys", "hello", ""); err == nil {
+		t.Error("GptQuery must still surface a refusal as an error")
+	}
+}
+
+// The use case the stop reason exists for: continue until the model stops
+// because it is finished rather than because it ran out of room.
+func TestClaudeContinuationLoop(t *testing.T) {
+	calls := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		io.ReadAll(r.Body)
+		w.Header().Set("Content-Type", "application/json")
+		calls++
+		if calls < 3 {
+			stopReasonResponse("chunk ", "max_tokens")(w)
+			return
+		}
+		stopReasonResponse("end", "end_turn")(w)
+	}))
+	defer srv.Close()
+
+	var c Claude
+	c.SetApiKey("k")
+	c.SetModel("claude-opus-5")
+	c.SetURL(srv.URL)
+
+	var full string
+	for i := 0; i < 10; i++ {
+		resp, err := c.Query("sys", "write a long thing", full)
+		if err != nil {
+			t.Fatalf("Query returned error: %v", err)
+		}
+		full += resp.Text
+		if !resp.Truncated() {
+			break
+		}
+	}
+
+	if calls != 3 {
+		t.Errorf("expected the loop to stop after 3 calls, made %d", calls)
+	}
+	if full != "chunk chunk end" {
+		t.Errorf("assembled text = %q, want %q", full, "chunk chunk end")
+	}
+}
+
+func TestClaudeMaxTokensOverride(t *testing.T) {
+	c, body, _ := newClaudeTestServer(t, okResponse("ok"))
+	c.SetMaxTokens(4096)
+
+	if _, err := c.GptQuery("sys", "hello", ""); err != nil {
+		t.Fatalf("GptQuery returned error: %v", err)
+	}
+	if got := (*body)["max_tokens"]; got != float64(4096) {
+		t.Errorf("max_tokens = %v, want 4096", got)
+	}
+}

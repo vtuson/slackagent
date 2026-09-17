@@ -70,10 +70,26 @@ func (c *Claude) getClient() *anthropic.Client {
 	return c.client
 }
 
-// GptQuery sends a single-turn query. The system prompt maps onto Anthropic's
-// top-level system field rather than a message role, and any context is
-// appended to the user turn.
-func (c *Claude) GptQuery(systemPrompt string, message string, context string) (string, error) {
+// normaliseClaudeStop maps Anthropic stop reasons onto the shared STOP* set.
+func normaliseClaudeStop(reason anthropic.StopReason) string {
+	switch reason {
+	case anthropic.StopReasonEndTurn, anthropic.StopReasonStopSequence:
+		return STOPEND
+	case anthropic.StopReasonMaxTokens:
+		return STOPMAXTOKENS
+	case anthropic.StopReasonToolUse:
+		return STOPTOOLUSE
+	case anthropic.StopReasonRefusal:
+		return STOPREFUSAL
+	default:
+		return STOPOTHER
+	}
+}
+
+// Query sends a single-turn query and reports why generation stopped. The
+// system prompt maps onto Anthropic's top-level system field rather than a
+// message role, and any context is appended to the user turn.
+func (c *Claude) Query(systemPrompt string, message string, context string) (*Response, error) {
 	userText := message
 	if context != "" {
 		userText = message + "\n\n" + context
@@ -102,21 +118,45 @@ func (c *Claude) GptQuery(systemPrompt string, message string, context string) (
 
 	resp, err := c.getClient().Messages.New(ctxBackground(), params)
 	if err != nil {
-		return "", fmt.Errorf("anthropic request failed: %w", err)
+		return nil, fmt.Errorf("anthropic request failed: %w", err)
 	}
 
+	out := &Response{
+		StopReason:    normaliseClaudeStop(resp.StopReason),
+		RawStopReason: string(resp.StopReason),
+	}
 	if resp.StopReason == anthropic.StopReasonRefusal {
-		return "", fmt.Errorf("anthropic declined the request: %s", resp.StopDetails.Explanation)
+		out.Detail = resp.StopDetails.Explanation
 	}
 
 	for _, block := range resp.Content {
 		if text, ok := block.AsAny().(anthropic.TextBlock); ok {
-			return text.Text, nil
+			out.Text = text.Text
+			break
 		}
 	}
 
-	log.Printf("anthropic returned no text block (stop_reason=%s, blocks=%d)\n", resp.StopReason, len(resp.Content))
-	return "", errors.New("no reply")
+	return out, nil
+}
+
+// GptQuery returns just the reply text. Callers that need to react to the stop
+// reason should use Query instead.
+func (c *Claude) GptQuery(systemPrompt string, message string, context string) (string, error) {
+	resp, err := c.Query(systemPrompt, message, context)
+	if err != nil {
+		return "", err
+	}
+
+	if resp.StopReason == STOPREFUSAL {
+		return "", fmt.Errorf("anthropic declined the request: %s", resp.Detail)
+	}
+
+	if resp.Text == "" {
+		log.Printf("anthropic returned no text (stop_reason=%s)\n", resp.RawStopReason)
+		return "", errors.New("no reply")
+	}
+
+	return resp.Text, nil
 }
 
 // ctxBackground is split out so callers that need cancellation can be added
