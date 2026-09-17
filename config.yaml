@@ -21,8 +21,16 @@ slack:
   channel: "C05RPHGAA9Y"
 
 gpt:
-  # OpenAI API Key
+  # OpenAI or Anthropic API key
   key: ""
   
-  # OpenAI model to use
-  model: "gpt-3.5-turbo" 
+  # Model to use. A "claude-" prefix routes to Anthropic, anything else to OpenAI
+  model: "gpt-3.5-turbo"
+
+  # Optional: "openai" or "anthropic". Inferred from the model name when empty
+  provider: ""
+
+  # Optional: cap on the reply length. 0 leaves the provider default
+  # (1024 for Anthropic, unset for OpenAI)
+  max_tokens: 0
+

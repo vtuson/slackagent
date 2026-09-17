@@ -3,7 +3,7 @@
 An opinionated Go scaffolding to build Slack agents powered by LLMs. It wires together:
 
 - **Slack Socket Mode** event ingestion and posting utilities
-- **OpenAI Chat Completions** helper
+- **LLM helper** supporting both **OpenAI Chat Completions** and the **Anthropic Messages API**
 - **MCP** connection helper
 - Optional **Gmail** polling utilities for email-driven workflows
 
@@ -13,7 +13,8 @@ You bring a small `main.go` that plugs in your business logic (Slack and/or Mail
 
 - **Socket Mode Slack client** with helpers to post to channels/threads, fetch thread replies, post/remove reactions and basic text formatting
 - **Event filter** that forwards `app_mention` and plain `message` events for your processing
-- **OpenAI client** wrapper with a simple `GptQuery` API and sensible defaults
+- **LLM client** wrapper with a simple `GptQuery` API and sensible defaults, backed by either OpenAI or Anthropic
+- **Provider-neutral stop reasons** via `Query`, so continuation loops work the same on either provider
 - **Gmail** utilities for polling labeled messages and parsing bodies (plain and HTML)
 - **MCP client** with support for Streamable, SSE, and STDIO transports for Model Context Protocol integration
 - **Notion MCP** integration with specialized client for Notion's MCP implementation
@@ -27,7 +28,10 @@ You bring a small `main.go` that plugs in your business logic (Slack and/or Mail
   - `notionmcp.go` — Specialized Notion MCP client implementation
   - `headers.go` — HTTP header utilities for MCP clients
 - `slack/` — Slack client and helpers (`PostInChannel`, `PostInThread`, `GetThreadMessages`, `StripAtMention`, `AddText`)
-- `gpt/` — Minimal OpenAI Chat Completions helper (`GptQuery`, `GetEmbedding`, `GetEmbeddingsBatch`)
+- `gpt/` — LLM helpers behind a common `LLM` interface (`GptQuery`, `Query`)
+  - `llm.go` — The `LLM` interface, `Response` type, stop reasons, and the provider factory
+  - `gpt.go` — OpenAI Chat Completions, plus embeddings (`GetEmbedding`, `GetEmbeddingsBatch`)
+  - `claude.go` — Anthropic Messages API
 - `embedding/` — Embedding generation and RAG utilities (local ONNX models and OpenAI embeddings)
 - `mail/` — Gmail connection and parsing utils
 - `config.yaml` — Example configuration
@@ -36,7 +40,7 @@ You bring a small `main.go` that plugs in your business logic (Slack and/or Mail
 
 - Go 1.20+
 - A Slack app with Bot Token and App-Level Token (Socket Mode)
-- OpenAI API key
+- An OpenAI API key or an Anthropic API key (an OpenAI key is additionally required for embeddings)
 - Optional Gmail OAuth credentials JSON (if using email polling)
 
 ### Install and setup
@@ -136,8 +140,10 @@ slack:
   channel: "CXXXXXXX"     # Default channel to post
 
 gpt:
-  key: "sk-..."           # OpenAI API Key
+  key: "sk-..."           # OpenAI or Anthropic API key
   model: "gpt-3.5-turbo"  # Model name
+  provider: ""            # Optional: "openai" or "anthropic". Inferred from the model when empty
+  max_tokens: 0           # Optional: reply cap. 0 leaves the provider default
 
 mcp:
   notion:
@@ -158,6 +164,104 @@ type MyConfig struct { MySetting int `yaml:"my_setting"`; FeatureFlag bool `yaml
 var cfg MyConfig
 _ = a.GetCustomConfig(&cfg)
 ```
+
+### Choosing an LLM provider
+
+`a.NewLLM()` returns a `gpt.LLM`, backed by either OpenAI or Anthropic. Which one you get is decided by the `gpt` block in your config.
+
+**By model name (no provider needed).** Any model starting with `claude-` is routed to Anthropic, anything else to OpenAI. Configs written before provider support existed keep working unchanged:
+
+```yaml
+gpt:
+  key: "sk-ant-..."
+  model: "claude-opus-5"    # inferred as anthropic
+```
+
+**Explicitly**, when you want to be unambiguous:
+
+```yaml
+gpt:
+  key: "..."
+  model: "..."
+  provider: "anthropic"     # or "openai"
+```
+
+`max_tokens` is optional and caps the reply length. Left at `0` (or omitted), each provider keeps its own default — `1024` for Anthropic, which requires the field, and omitted entirely for OpenAI, which does not:
+
+```yaml
+gpt:
+  max_tokens: 4096
+```
+
+An unknown provider name fails at `LoadConfig` time rather than on the first query.
+
+#### Asking a question
+
+`GptQuery` returns the reply text, and treats a refusal or an empty reply as an error:
+
+```go
+llm := a.NewLLM()
+reply, err := llm.GptQuery("You are a helpful Slack bot.", prompt, "")
+```
+
+The third argument is optional extra context. OpenAI receives it as an additional user message; Anthropic receives it appended to the user turn.
+
+#### Stop reasons and continuation loops
+
+`Query` returns the reply together with why generation stopped, which is what you need to continue a reply that ran out of room:
+
+```go
+var full string
+for {
+    resp, err := llm.Query(system, prompt, full)
+    if err != nil {
+        return err
+    }
+    full += resp.Text
+    if !resp.Truncated() {
+        break
+    }
+}
+```
+
+`Response` carries:
+
+| Field | Meaning |
+|---|---|
+| `Text` | The reply text |
+| `StopReason` | Normalised — one of the `STOP*` constants below |
+| `RawStopReason` | The provider's own value, for logging |
+| `Detail` | Provider explanation, e.g. why a request was refused. Usually empty |
+
+Providers spell stop reasons differently, so they are normalised onto a shared set and a loop written against one provider behaves the same on the other:
+
+| Constant | OpenAI | Anthropic |
+|---|---|---|
+| `gpt.STOPEND` | `stop` | `end_turn`, `stop_sequence` |
+| `gpt.STOPMAXTOKENS` | `length` | `max_tokens` |
+| `gpt.STOPTOOLUSE` | `tool_calls`, `function_call` | `tool_use` |
+| `gpt.STOPREFUSAL` | `content_filter` | `refusal` |
+| `gpt.STOPOTHER` | anything else | anything else |
+
+`resp.Truncated()` is shorthand for `StopReason == gpt.STOPMAXTOKENS`.
+
+`Query` and `GptQuery` differ in how they treat a refusal: `Query` reports it as data, so a loop can branch on it, while `GptQuery` returns an error.
+
+> **Note:** `Query` is single-turn — it does not carry message history. The loop above feeds the text so far back through the `context` argument, which is an approximation of a real continuation rather than resuming an assistant turn. It is enough to detect and react to truncation; if you need true multi-turn continuation, raise an issue and the interface can grow a history-carrying call.
+
+#### Embeddings are OpenAI-only
+
+Anthropic has no embeddings endpoint, so embeddings stay on the OpenAI client regardless of which provider handles chat. Use `a.NewEmbedder()`, which returns an error rather than silently producing garbage when the agent is configured for Anthropic:
+
+```go
+embedder, err := a.NewEmbedder()
+if err != nil {
+    // configured for Anthropic — supply an OpenAI key if you need embeddings
+}
+vec, err := embedder.GetEmbedding("some text")
+```
+
+If you need Claude for chat *and* embeddings, construct a `gpt.OpenAI` directly with an OpenAI key alongside your Anthropic config.
 
 ### Slack bot configuration (api.slack.com)
 
@@ -208,7 +312,7 @@ If you maintain this repo/module directly and want an example `main.go` inside i
 ### Production tips
 
 - Prefer environment variables or a secret manager over committing keys to `config.yaml`
-- Handle OpenAI/API errors and timeouts robustly; consider retries and rate limits
+- Handle LLM API errors and timeouts robustly; consider retries and rate limits
 - Validate Slack event types and signatures if you later move away from Socket Mode
 - Persist `mail.maxid` (or store last processed message ID elsewhere) to avoid reprocessing
 
@@ -216,6 +320,7 @@ If you maintain this repo/module directly and want an example `main.go` inside i
 
 - Slack client not connecting: verify App-Level Token, enable Socket Mode, and required scopes
 - No events received: ensure Event Subscriptions include `app_mention` and message events; app is installed to the workspace and the channel
-- OpenAI errors: verify API key and model name; watch for quota limits
+- LLM errors: verify API key and model name; watch for quota limits. Check that `gpt.provider` matches the key you supplied — a `claude-` model with an `sk-` key (or the reverse) will fail to authenticate
+- Embedding errors on an Anthropic config: embeddings are OpenAI-only, see **Choosing an LLM provider**
 - Gmail auth: ensure the token cache under `~/.credentials/` is created; re-run with `mail.auth_token` if needed
 

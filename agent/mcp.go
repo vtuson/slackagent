@@ -74,16 +74,18 @@ func ConnectMCP(ctx context.Context, opts MCPOptions) (*MCPClient, error) {
 			return nil, errors.New("streamable method selected but URL is empty")
 		}
 		log.Printf("connecting to MCP server with URL: %s", opts.URL)
-		transport = mcp.NewStreamableClientTransport(opts.URL, &mcp.StreamableClientTransportOptions{
+		transport = &mcp.StreamableClientTransport{
+			Endpoint:   opts.URL,
 			HTTPClient: opts.HTTPClient,
-		})
+		}
 	case MethodSSE:
 		if opts.URL == "" {
 			return nil, errors.New("sse method selected but URL is empty")
 		}
-		transport = mcp.NewSSEClientTransport(opts.URL, &mcp.SSEClientTransportOptions{
+		transport = &mcp.SSEClientTransport{
+			Endpoint:   opts.URL,
 			HTTPClient: opts.HTTPClient,
-		})
+		}
 	case MethodSTDIO:
 		if opts.Command == "" {
 			return nil, errors.New("stdio method selected but Command is empty")
@@ -95,13 +97,13 @@ func ConnectMCP(ctx context.Context, opts MCPOptions) (*MCPClient, error) {
 				cmd.Env = append(os.Environ(), env)
 			}
 		}
-		transport = mcp.NewCommandTransport(cmd)
+		transport = &mcp.CommandTransport{Command: cmd}
 
 	default:
 		return nil, fmt.Errorf("unsupported MCP connection method: %q", string(opts.Method))
 	}
 
-	session, err := client.Connect(ctx, transport)
+	session, err := client.Connect(ctx, transport, nil)
 	if err != nil {
 		return nil, fmt.Errorf("connect MCP: %w", err)
 	}

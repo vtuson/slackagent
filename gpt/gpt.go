@@ -28,9 +28,10 @@ type GPTmessage struct {
 }
 
 type OpenAI struct {
-	apiKey string
-	model  string
-	url    string
+	apiKey    string
+	model     string
+	url       string
+	maxTokens int64
 }
 
 // embeddingResponse represents the OpenAI embedding API response
@@ -60,7 +61,30 @@ func (o *OpenAI) SetModel(model string) {
 	o.model = model
 }
 
-func (o *OpenAI) GptQuery(systemPrompt string, message string, context string) (string, error) {
+// SetMaxTokens caps the reply length. Unlike Anthropic, OpenAI treats
+// max_tokens as optional, so zero or less leaves it out of the request.
+func (o *OpenAI) SetMaxTokens(maxTokens int64) {
+	o.maxTokens = maxTokens
+}
+
+// normaliseOpenAIStop maps OpenAI finish reasons onto the shared STOP* set.
+func normaliseOpenAIStop(reason string) string {
+	switch reason {
+	case "stop":
+		return STOPEND
+	case "length":
+		return STOPMAXTOKENS
+	case "tool_calls", "function_call":
+		return STOPTOOLUSE
+	case "content_filter":
+		return STOPREFUSAL
+	default:
+		return STOPOTHER
+	}
+}
+
+// Query sends a single-turn query and reports why generation stopped.
+func (o *OpenAI) Query(systemPrompt string, message string, context string) (*Response, error) {
 
 	systemMessage := GPTmessage{
 		Role:    SYSTEMROLE,
@@ -89,11 +113,26 @@ func (o *OpenAI) GptQuery(systemPrompt string, message string, context string) (
 		"model":    o.model,
 		"messages": messages,
 	}
+	if o.maxTokens > 0 {
+		data["max_tokens"] = o.maxTokens
+	}
 	return o.gptSend(data)
-
 }
 
-func (o *OpenAI) gptSend(data map[string]interface{}) (string, error) {
+// GptQuery returns just the reply text. Callers that need to react to the stop
+// reason should use Query instead.
+func (o *OpenAI) GptQuery(systemPrompt string, message string, context string) (string, error) {
+	resp, err := o.Query(systemPrompt, message, context)
+	if err != nil {
+		return "", err
+	}
+	if resp.Text == "" {
+		return "", errors.New("no reply")
+	}
+	return resp.Text, nil
+}
+
+func (o *OpenAI) gptSend(data map[string]interface{}) (*Response, error) {
 
 	jsonData, _ := json.Marshal(data)
 
@@ -105,7 +144,7 @@ func (o *OpenAI) gptSend(data map[string]interface{}) (string, error) {
 	req, err := http.NewRequest("POST", url, bytes.NewBuffer(jsonData))
 	if err != nil {
 		fmt.Println("Failed to create API request " + err.Error())
-		return "", err
+		return nil, err
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Authorization", "Bearer "+o.apiKey)
@@ -114,33 +153,34 @@ func (o *OpenAI) gptSend(data map[string]interface{}) (string, error) {
 	resp, err := client.Do(req)
 	if err != nil {
 		fmt.Println("Failed to make API request" + err.Error())
-		return "", err
+		return nil, err
 	}
 
 	defer resp.Body.Close()
 	respBody, err := ioutil.ReadAll(resp.Body)
 	if err != nil {
 		fmt.Println("Failed to read API response " + err.Error())
-		return "", err
+		return nil, err
 	}
 
 	var gptMesg gpt.ChatResponse
 	err = json.Unmarshal(respBody, &gptMesg)
 	if err != nil {
 		fmt.Printf("Error unmarshalling JSON: %v\n", err)
-		return "", err
+		return nil, err
 	}
 
-	var reply string
-	if len(gptMesg.Choices) > 0 {
-		reply = gptMesg.Choices[0].Message.Content
-	} else {
-		log.Printf("%v\n", gptMesg)
-		return "", errors.New("no reply")
+	if len(gptMesg.Choices) == 0 {
+		log.Printf("openai returned no choices\n")
+		return &Response{StopReason: STOPOTHER}, nil
 	}
 
-	return reply, nil
-
+	choice := gptMesg.Choices[0]
+	return &Response{
+		Text:          choice.Message.Content,
+		StopReason:    normaliseOpenAIStop(choice.FinishReason),
+		RawStopReason: choice.FinishReason,
+	}, nil
 }
 
 // GetEmbedding generates an embedding vector for the given text using OpenAI's embedding API

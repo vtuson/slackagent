@@ -26,8 +26,10 @@ type Config struct {
 		Channel  string `yaml:"channel"`
 	} `yaml:"slack"`
 	GPT *struct {
-		Key   string `yaml:"key"`
-		Model string `yaml:"model"`
+		Key       string `yaml:"key"`
+		Model     string `yaml:"model"`
+		Provider  string `yaml:"provider,omitempty"`
+		MaxTokens int64  `yaml:"max_tokens,omitempty"`
 	} `yaml:"gpt"`
 	Mail *struct {
 		Label     string `yaml:"label"`
@@ -98,8 +100,15 @@ func (a *Agent) LoadConfig(configPath string) error {
 	if config.GPT == nil {
 		log.Println("GPT configuration is not required in config file")
 	} else if config.GPT.Key == "" {
-		log.Fatal("OpenAI API Key is required in config file")
+		log.Fatal("An LLM API key is required in config file")
 	} else {
+		if config.GPT.Provider == "" {
+			config.GPT.Provider = gpt.DetectProvider(config.GPT.Model)
+			log.Println("Using inferred llm provider: ", config.GPT.Provider)
+		}
+		if _, err := gpt.NewProvider(config.GPT.Provider, config.GPT.Key, config.GPT.Model); err != nil {
+			log.Fatalf("Invalid llm configuration: %v", err)
+		}
 		a.gptApiKey = config.GPT.Key
 	}
 
@@ -173,16 +182,46 @@ func (a *Agent) ProcessEmails() {
 		time.Sleep(time.Duration(durationSleep) * time.Minute)
 	}
 }
-func (a *Agent) NewLLM() *gpt.OpenAI {
-	var openai gpt.OpenAI
-	openai.SetApiKey(a.Config.GPT.Key)
+
+// NewLLM returns a chat provider for the configured llm. The provider is taken
+// from the config, or inferred from the model name when it is not set.
+func (a *Agent) NewLLM() gpt.LLM {
+	provider := a.Config.GPT.Provider
+	if provider == "" {
+		provider = gpt.DetectProvider(a.Config.GPT.Model)
+	}
+
 	if a.Config.GPT.Model == "" {
-		a.Config.GPT.Model = gpt.GetDefaultModel()
+		a.Config.GPT.Model = gpt.GetDefaultModelFor(provider)
 		log.Println("Using default model: ", a.Config.GPT.Model)
 	}
-	openai.SetModel(a.Config.GPT.Model)
 
-	return &openai
+	llm, err := gpt.NewProvider(provider, a.Config.GPT.Key, a.Config.GPT.Model)
+	if err != nil {
+		log.Fatalf("Failed to create llm provider: %v", err)
+	}
+
+	// An unset max_tokens leaves each provider on its own default.
+	if a.Config.GPT.MaxTokens > 0 {
+		llm.SetMaxTokens(a.Config.GPT.MaxTokens)
+	}
+
+	return llm
+}
+
+// NewEmbedder returns an OpenAI client for embeddings. Anthropic has no
+// embeddings endpoint, so this is OpenAI-only regardless of the chat provider.
+func (a *Agent) NewEmbedder() (*gpt.OpenAI, error) {
+	if a.Config.GPT == nil {
+		return nil, errors.New("no gpt configuration found")
+	}
+	if provider := gpt.DetectProvider(a.Config.GPT.Model); a.Config.GPT.Provider == gpt.PROVIDERANTHROPIC || provider == gpt.PROVIDERANTHROPIC {
+		return nil, errors.New("embeddings require an openai key, anthropic has no embeddings endpoint")
+	}
+
+	var openai gpt.OpenAI
+	openai.SetApiKey(a.Config.GPT.Key)
+	return &openai, nil
 }
 
 func (a *Agent) slackFilter(event interface{}) {
