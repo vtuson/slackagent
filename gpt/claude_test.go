@@ -340,3 +340,77 @@ func TestClaudeMaxTokensOverride(t *testing.T) {
 		t.Errorf("max_tokens = %v, want 4096", got)
 	}
 }
+
+// Neither knob may appear in the request unless it was configured, otherwise
+// every caller would be silently opted into a default they never chose.
+func TestClaudeOmitsUnsetKnobs(t *testing.T) {
+	c, body, _ := newClaudeTestServer(t, okResponse("ok"))
+
+	if _, err := c.GptQuery("", "hello", ""); err != nil {
+		t.Fatalf("GptQuery returned error: %v", err)
+	}
+
+	if _, present := (*body)["temperature"]; present {
+		t.Error("temperature was sent without being configured")
+	}
+	if _, present := (*body)["output_config"]; present {
+		t.Error("output_config was sent without an effort being configured")
+	}
+}
+
+// Effort goes inside output_config, not at the top level.
+func TestClaudeSendsEffortInOutputConfig(t *testing.T) {
+	c, body, _ := newClaudeTestServer(t, okResponse("ok"))
+	c.SetEffort(EFFORTMEDIUM)
+
+	if _, err := c.GptQuery("", "hello", ""); err != nil {
+		t.Fatalf("GptQuery returned error: %v", err)
+	}
+
+	if _, present := (*body)["effort"]; present {
+		t.Error("effort was sent top-level; Anthropic expects it inside output_config")
+	}
+	outputConfig, ok := (*body)["output_config"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("expected an output_config object, got %#v", (*body)["output_config"])
+	}
+	if got := outputConfig["effort"]; got != EFFORTMEDIUM {
+		t.Errorf("output_config.effort = %v, want %q", got, EFFORTMEDIUM)
+	}
+}
+
+func TestClaudeSendsTemperature(t *testing.T) {
+	c, body, _ := newClaudeTestServer(t, okResponse("ok"))
+	c.SetModel("claude-opus-4-6") // an older model that still accepts sampling
+	temp := 0.4
+	c.SetTemperature(&temp)
+
+	if _, err := c.GptQuery("", "hello", ""); err != nil {
+		t.Fatalf("GptQuery returned error: %v", err)
+	}
+
+	if got := (*body)["temperature"]; got != 0.4 {
+		t.Errorf("temperature = %v, want 0.4", got)
+	}
+}
+
+// A zero temperature must reach the wire. The SDK omits zero-valued fields, so
+// this pins that the param.Opt wrapper is doing its job.
+func TestClaudeSendsZeroTemperature(t *testing.T) {
+	c, body, _ := newClaudeTestServer(t, okResponse("ok"))
+	c.SetModel("claude-opus-4-6")
+	zero := 0.0
+	c.SetTemperature(&zero)
+
+	if _, err := c.GptQuery("", "hello", ""); err != nil {
+		t.Fatalf("GptQuery returned error: %v", err)
+	}
+
+	got, present := (*body)["temperature"]
+	if !present {
+		t.Fatal("temperature 0 never reached the request body")
+	}
+	if got != 0.0 {
+		t.Errorf("temperature = %v, want 0", got)
+	}
+}

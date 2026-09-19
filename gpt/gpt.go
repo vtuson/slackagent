@@ -22,6 +22,14 @@ const (
 	MODELEMBEDDING = "text-embedding-3-small"
 )
 
+// openaiReasoning lists the model families that reject temperature and take
+// reasoning_effort instead. Everything else is the other way round: the chat
+// models take temperature and have no effort dial.
+//
+// Prefixes, so point releases are covered. This table goes stale every time
+// OpenAI ships a family; it is the only place to edit when they do.
+var openaiReasoning = []string{"o1", "o3", "o4", "gpt-5"}
+
 type GPTmessage struct {
 	Role    string `json:"role"`
 	Content string `json:"content"`
@@ -32,6 +40,12 @@ type OpenAI struct {
 	model     string
 	url       string
 	maxTokens int64
+
+	// temperature is nil when unset. Zero is a real value here (it is the
+	// usual request for determinism), so it cannot double as "unset" the
+	// way maxTokens does.
+	temperature *float64
+	effort      string
 }
 
 // embeddingResponse represents the OpenAI embedding API response
@@ -65,6 +79,36 @@ func (o *OpenAI) SetModel(model string) {
 // max_tokens as optional, so zero or less leaves it out of the request.
 func (o *OpenAI) SetMaxTokens(maxTokens int64) {
 	o.maxTokens = maxTokens
+}
+
+// SetTemperature sets the sampling temperature. OpenAI's range is 0-2 with a
+// default of 1, so a value ported straight from an Anthropic config means
+// something different here. The reasoning models reject it; see Supports.
+func (o *OpenAI) SetTemperature(temperature *float64) {
+	o.temperature = temperature
+}
+
+// SetEffort sets reasoning_effort, which the reasoning models take in place of
+// the sampling params.
+func (o *OpenAI) SetEffort(effort string) {
+	o.effort = effort
+}
+
+// Supports reports whether the configured model accepts a knob.
+func (o *OpenAI) Supports(knob string) bool {
+	model := o.model
+	if model == "" {
+		model = MODELGPT35
+	}
+
+	switch knob {
+	case KNOBTEMPERATURE:
+		return !hasAnyPrefix(model, openaiReasoning)
+	case KNOBEFFORT:
+		return hasAnyPrefix(model, openaiReasoning)
+	default:
+		return false
+	}
 }
 
 // normaliseOpenAIStop maps OpenAI finish reasons onto the shared STOP* set.
@@ -115,6 +159,14 @@ func (o *OpenAI) Query(systemPrompt string, message string, context string) (*Re
 	}
 	if o.maxTokens > 0 {
 		data["max_tokens"] = o.maxTokens
+	}
+	// Both knobs stay off the request unless configured. ApplyKnobs has
+	// already refused any the model rejects, so no capability check here.
+	if o.temperature != nil {
+		data["temperature"] = *o.temperature
+	}
+	if o.effort != "" {
+		data["reasoning_effort"] = o.effort
 	}
 	return o.gptSend(data)
 }

@@ -18,6 +18,36 @@ const (
 	CLAUDEMAXTOKENS = 1024
 )
 
+// claudeNoSampling lists the models that removed temperature/top_p/top_k.
+// Sampling params were dropped on Opus 4.7 and on everything released after
+// it; anything older still accepts them. Prefixes, so point releases are
+// covered without listing each one.
+//
+// This table goes stale every time Anthropic ships a model. When a new model
+// rejects a knob this is the only place to edit.
+var claudeNoSampling = []string{
+	"claude-opus-4-7",
+	"claude-opus-4-8",
+	"claude-opus-5",
+	"claude-sonnet-5",
+	"claude-fable-5",
+	"claude-mythos-5",
+}
+
+// claudeEffort lists the models that accept output_config.effort. It arrived
+// with Opus 4.5; Sonnet 4.5, Haiku 4.5 and the claude-3 family predate it.
+var claudeEffort = []string{
+	"claude-opus-4-5",
+	"claude-opus-4-6",
+	"claude-opus-4-7",
+	"claude-opus-4-8",
+	"claude-opus-5",
+	"claude-sonnet-4-6",
+	"claude-sonnet-5",
+	"claude-fable-5",
+	"claude-mythos-5",
+}
+
 // Claude talks to the Anthropic Messages API. It mirrors the OpenAI type so
 // the two are interchangeable behind the LLM interface.
 type Claude struct {
@@ -25,6 +55,12 @@ type Claude struct {
 	model     string
 	url       string
 	maxTokens int64
+
+	// temperature is nil when unset. It cannot use the "0 means unset"
+	// shortcut maxTokens uses, because 0 is the value callers most often
+	// want.
+	temperature *float64
+	effort      string
 
 	client *anthropic.Client
 }
@@ -48,6 +84,35 @@ func (c *Claude) SetURL(url string) {
 // SetMaxTokens overrides the default response ceiling.
 func (c *Claude) SetMaxTokens(maxTokens int64) {
 	c.maxTokens = maxTokens
+}
+
+// SetTemperature sets the sampling temperature. Anthropic's range is 0-1, and
+// the newer models reject the parameter outright; see Supports.
+func (c *Claude) SetTemperature(temperature *float64) {
+	c.temperature = temperature
+}
+
+// SetEffort sets output_config.effort, which replaced the sampling params on
+// the newer models.
+func (c *Claude) SetEffort(effort string) {
+	c.effort = effort
+}
+
+// Supports reports whether the configured model accepts a knob.
+func (c *Claude) Supports(knob string) bool {
+	model := c.model
+	if model == "" {
+		model = MODELCLAUDE
+	}
+
+	switch knob {
+	case KNOBTEMPERATURE:
+		return !hasAnyPrefix(model, claudeNoSampling)
+	case KNOBEFFORT:
+		return hasAnyPrefix(model, claudeEffort)
+	default:
+		return false
+	}
 }
 
 // getClient builds the SDK client on first use, so the setters can be called
@@ -114,6 +179,16 @@ func (c *Claude) Query(systemPrompt string, message string, context string) (*Re
 	}
 	if systemPrompt != "" {
 		params.System = []anthropic.TextBlockParam{{Text: systemPrompt}}
+	}
+	// Both knobs are left off the request unless configured. ApplyKnobs has
+	// already refused any the model rejects, so no capability check here.
+	if c.temperature != nil {
+		params.Temperature = anthropic.Float(*c.temperature)
+	}
+	if c.effort != "" {
+		params.OutputConfig = anthropic.OutputConfigParam{
+			Effort: anthropic.OutputConfigEffort(c.effort),
+		}
 	}
 
 	resp, err := c.getClient().Messages.New(ctxBackground(), params)

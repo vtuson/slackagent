@@ -144,6 +144,8 @@ gpt:
   model: "gpt-3.5-turbo"  # Model name
   provider: ""            # Optional: "openai" or "anthropic". Inferred from the model when empty
   max_tokens: 0           # Optional: reply cap. 0 leaves the provider default
+  temperature: 0.7        # Optional: sampling temperature. Omit to leave unset
+  effort: "medium"        # Optional: reasoning depth. Omit to leave unset
 
 mcp:
   notion:
@@ -194,6 +196,68 @@ gpt:
 ```
 
 An unknown provider name fails at `LoadConfig` time rather than on the first query.
+
+### Tuning knobs: temperature and effort
+
+Both providers removed the sampling parameters from their newest models and
+replaced them with a reasoning-effort dial, so the two knobs are very nearly
+mutually exclusive:
+
+|                          | `temperature` | `effort` |
+| ------------------------ | ------------- | -------- |
+| `gpt-3.5` / `gpt-4o`     | yes           | no       |
+| o-series / `gpt-5`       | no            | yes      |
+| `claude-3.x` / `haiku-4-5` | yes         | no       |
+| `claude-opus-5`          | no            | yes      |
+
+There is no knob that works across the whole matrix, so setting one the chosen
+model rejects would be a 400 on the first Slack mention. Instead it fails at
+`LoadConfig` with a message naming the model:
+
+```
+Invalid llm configuration: model "claude-opus-5" does not accept temperature;
+it was removed on this model in favour of effort, so drop the temperature
+setting or pick an older model
+```
+
+`temperature` is passed through **provider-native and is not rescaled**, so the
+same number means different things: OpenAI's range is 0–2 with a default of 1,
+Anthropic's is 0–1. A value copied from one config to the other will not behave
+the same.
+
+Omitting `temperature` leaves it unset, which is deliberately different from
+setting it to `0` — zero is a real value asking for the most deterministic
+output. In Go this is why the config field is a `*float64`:
+
+```yaml
+gpt:
+  model: "gpt-4o"
+  temperature: 0        # sent as temperature=0
+```
+
+`effort` is one of `low`, `medium`, `high`, `xhigh`, `max`. OpenAI stops at
+`high`; the top two are Anthropic-only. It maps onto `output_config.effort` for
+Anthropic and `reasoning_effort` for OpenAI:
+
+```yaml
+gpt:
+  model: "claude-opus-5"
+  effort: "low"         # cheaper and faster on routine mentions
+```
+
+Which models accept which knob is a pair of prefix tables — `claudeNoSampling`
+and `claudeEffort` in `gpt/claude.go`, `openaiReasoning` in `gpt/gpt.go`. They
+go stale whenever a provider ships a model, and they are the only place to edit
+when that happens.
+
+To check from code rather than config, ask the provider:
+
+```go
+llm := a.NewLLM()
+if llm.Supports(gpt.KNOBEFFORT) {
+    llm.SetEffort(gpt.EFFORTLOW)
+}
+```
 
 #### Asking a question
 
