@@ -18,36 +18,6 @@ const (
 	CLAUDEMAXTOKENS = 1024
 )
 
-// claudeNoSampling lists the models that removed temperature/top_p/top_k.
-// Sampling params were dropped on Opus 4.7 and on everything released after
-// it; anything older still accepts them. Prefixes, so point releases are
-// covered without listing each one.
-//
-// This table goes stale every time Anthropic ships a model. When a new model
-// rejects a knob this is the only place to edit.
-var claudeNoSampling = []string{
-	"claude-opus-4-7",
-	"claude-opus-4-8",
-	"claude-opus-5",
-	"claude-sonnet-5",
-	"claude-fable-5",
-	"claude-mythos-5",
-}
-
-// claudeEffort lists the models that accept output_config.effort. It arrived
-// with Opus 4.5; Sonnet 4.5, Haiku 4.5 and the claude-3 family predate it.
-var claudeEffort = []string{
-	"claude-opus-4-5",
-	"claude-opus-4-6",
-	"claude-opus-4-7",
-	"claude-opus-4-8",
-	"claude-opus-5",
-	"claude-sonnet-4-6",
-	"claude-sonnet-5",
-	"claude-fable-5",
-	"claude-mythos-5",
-}
-
 // Claude talks to the Anthropic Messages API. It mirrors the OpenAI type so
 // the two are interchangeable behind the LLM interface.
 type Claude struct {
@@ -87,7 +57,7 @@ func (c *Claude) SetMaxTokens(maxTokens int64) {
 }
 
 // SetTemperature sets the sampling temperature. Anthropic's range is 0-1, and
-// the newer models reject the parameter outright; see Supports.
+// the newer models reject the parameter outright rather than ignoring it.
 func (c *Claude) SetTemperature(temperature *float64) {
 	c.temperature = temperature
 }
@@ -98,21 +68,21 @@ func (c *Claude) SetEffort(effort string) {
 	c.effort = effort
 }
 
-// Supports reports whether the configured model accepts a knob.
-func (c *Claude) Supports(knob string) bool {
-	model := c.model
-	if model == "" {
-		model = MODELCLAUDE
+// modelOrDefault is the model this client will actually send, which is the
+// default whenever none was configured.
+func (c *Claude) modelOrDefault() string {
+	if c.model == "" {
+		return MODELCLAUDE
 	}
+	return c.model
+}
 
-	switch knob {
-	case KNOBTEMPERATURE:
-		return !hasAnyPrefix(model, claudeNoSampling)
-	case KNOBEFFORT:
-		return hasAnyPrefix(model, claudeEffort)
-	default:
-		return false
-	}
+// explainRequestError is the single exit for a failed Messages call. A knob
+// the model no longer accepts surfaces here, as a 400, rather than at
+// startup, so the wrapper names the knob before the error reaches a caller
+// that has no idea a temperature was ever set.
+func (c *Claude) explainRequestError(err error) error {
+	return fmt.Errorf("anthropic request failed: %w", explainKnobRejection(err, c.modelOrDefault(), c.temperature, c.effort))
 }
 
 // getClient builds the SDK client on first use, so the setters can be called
@@ -155,22 +125,18 @@ func normaliseClaudeStop(reason anthropic.StopReason) string {
 // conversation: model, ceiling and any configured knobs. Query and chat turns
 // share it so a knob cannot end up applied to one and not the other.
 func (c *Claude) baseParams() anthropic.MessageNewParams {
-	model := c.model
-	if model == "" {
-		model = MODELCLAUDE
-	}
-
 	maxTokens := c.maxTokens
 	if maxTokens <= 0 {
 		maxTokens = CLAUDEMAXTOKENS
 	}
 
 	params := anthropic.MessageNewParams{
-		Model:     anthropic.Model(model),
+		Model:     anthropic.Model(c.modelOrDefault()),
 		MaxTokens: maxTokens,
 	}
-	// Both knobs are left off the request unless configured. ApplyKnobs has
-	// already refused any the model rejects, so no capability check here.
+	// Both knobs are left off the request unless configured, and go out as
+	// given: whether this model still accepts them is the API's call, and a
+	// refusal comes back through explainRequestError.
 	if c.temperature != nil {
 		params.Temperature = anthropic.Float(*c.temperature)
 	}
@@ -286,7 +252,7 @@ func (c *Claude) Query(systemPrompt string, message string, context string) (*Re
 
 	resp, err := c.getClient().Messages.New(ctxBackground(), params)
 	if err != nil {
-		return nil, fmt.Errorf("anthropic request failed: %w", err)
+		return nil, c.explainRequestError(err)
 	}
 
 	return claudeResponse(resp), nil
@@ -368,7 +334,7 @@ func (ch *claudeChat) send() (*Response, error) {
 
 	resp, err := ch.c.getClient().Messages.New(ctxBackground(), params)
 	if err != nil {
-		return nil, fmt.Errorf("anthropic request failed: %w", err)
+		return nil, ch.c.explainRequestError(err)
 	}
 
 	// The assistant turn is appended before the tools run: the results are

@@ -22,21 +22,19 @@ const (
 	STOPOTHER     = "other"      // anything the providers add later
 )
 
-// Tunable knobs, named so callers can ask Supports about them.
+// Tunable knobs, named so a rejection can say which one the provider turned
+// down.
 //
-// No knob works on every model. Both providers removed the sampling params
+// No knob works on every model: both providers removed the sampling params
 // from their newest models and replaced them with an effort dial, so the two
-// knobs are very nearly mutually exclusive:
+// are very nearly mutually exclusive, and which side of the line a given
+// model falls on changes with every release.
 //
-//	                      temperature   effort
-//	gpt-3.5 / gpt-4o          yes         no
-//	o-series / gpt-5          no          yes
-//	claude-3.x / haiku-4-5    yes         no
-//	claude-opus-5             no          yes
-//
-// Setting one on a model that rejects it is a 400 from the provider, which is
-// why NewLLM checks Supports at startup instead of finding out on the first
-// Slack mention.
+// Nothing here checks that up front. A table of which model accepts which
+// parameter is stale the day a provider ships, and a stale table is worse
+// than none: it refuses a config that would have worked. The provider is the
+// authority, so knobs go out as configured and a rejection is explained
+// after the fact; see explainKnobRejection.
 const (
 	KNOBTEMPERATURE = "temperature"
 	KNOBEFFORT      = "effort"
@@ -108,13 +106,15 @@ type LLM interface {
 	// The value is passed through provider-native and is NOT rescaled, so
 	// the meaningful range differs: 0-2 on OpenAI (1 is its default), 0-1
 	// on Anthropic. The same number is a different request to each.
+	//
+	// It is not checked against the model. A model that no longer accepts
+	// the parameter rejects the request, and that rejection is reported
+	// with the knob named.
 	SetTemperature(temperature *float64)
-	// SetEffort sets reasoning depth on models that support it, using one of
-	// the EFFORT* constants. An empty string leaves it unset.
+	// SetEffort sets reasoning depth, using one of the EFFORT* constants. An
+	// empty string leaves it unset. Like SetTemperature it is not checked
+	// against the model, only against the set of known levels.
 	SetEffort(effort string)
-	// Supports reports whether the currently configured model accepts a
-	// knob, so callers can fail at startup rather than on first use.
-	Supports(knob string) bool
 	// NewChat starts a multi-turn conversation with a fixed system prompt
 	// and tool set. It is the only entry point that can carry tools,
 	// because answering a tool call needs a second request that still
@@ -179,9 +179,13 @@ func NewProvider(provider string, key string, model string) (LLM, error) {
 	}
 }
 
-// ValidEffort reports whether a string is one of the EFFORT* levels. It does
-// not check that the configured model accepts that particular level, only
-// that the value is a level at all; Supports covers the model side.
+// ValidEffort reports whether a string is one of the EFFORT* levels.
+//
+// This is the one piece of validation kept up front, because the level set is
+// a fixed vocabulary rather than a per-model capability: a typo like "hihg"
+// is a config mistake at any model, and catching it at load costs nothing in
+// staleness. Whether the chosen model accepts a valid level is the provider's
+// call, not ours.
 func ValidEffort(effort string) bool {
 	switch effort {
 	case EFFORTLOW, EFFORTMEDIUM, EFFORTHIGH, EFFORTXHIGH, EFFORTMAX:
@@ -190,17 +194,20 @@ func ValidEffort(effort string) bool {
 	return false
 }
 
-// ApplyKnobs sets the optional tuning knobs on an already-built provider,
-// refusing any the configured model does not accept. It exists so a bad
-// combination is caught once at startup with a message naming the model,
-// rather than as a 400 on the first query.
+// ApplyKnobs sets the optional tuning knobs on an already-built provider.
+//
+// It does not ask whether the model accepts them. Which models take
+// temperature and which take effort moves with every provider release, so
+// the pairing is left to whoever wrote the config and the provider settles
+// it on the first request; a rejection comes back through
+// explainKnobRejection naming the knob.
+//
+// The one thing still refused here is an effort level that is not a level at
+// all, which no release can turn into a valid value.
 //
 // A nil temperature and an empty effort are "not configured" and are skipped.
-func ApplyKnobs(llm LLM, model string, temperature *float64, effort string) error {
+func ApplyKnobs(llm LLM, temperature *float64, effort string) error {
 	if temperature != nil {
-		if !llm.Supports(KNOBTEMPERATURE) {
-			return fmt.Errorf("model %q does not accept %s; it was removed on this model in favour of %s, so drop the temperature setting or pick an older model", model, KNOBTEMPERATURE, KNOBEFFORT)
-		}
 		llm.SetTemperature(temperature)
 	}
 
@@ -208,26 +215,56 @@ func ApplyKnobs(llm LLM, model string, temperature *float64, effort string) erro
 		if !ValidEffort(effort) {
 			return fmt.Errorf("invalid %s %q, expected one of %s, %s, %s, %s, %s", KNOBEFFORT, effort, EFFORTLOW, EFFORTMEDIUM, EFFORTHIGH, EFFORTXHIGH, EFFORTMAX)
 		}
-		if !llm.Supports(KNOBEFFORT) {
-			return fmt.Errorf("model %q does not accept %s; only reasoning-capable models do, so drop the effort setting or pick a newer model", model, KNOBEFFORT)
-		}
 		llm.SetEffort(effort)
 	}
 
 	return nil
 }
 
-// hasAnyPrefix reports whether model begins with any of the prefixes, ignoring
-// case. The capability tables in claude.go and gpt.go are prefix lists because
-// model names are versioned by suffix.
-func hasAnyPrefix(model string, prefixes []string) bool {
-	m := strings.ToLower(model)
-	for _, p := range prefixes {
-		if strings.HasPrefix(m, p) {
-			return true
+// knobWireNames maps a knob to the spellings a provider might use for it in
+// an error message. Effort has two because the providers put it in different
+// places on the request: OpenAI as top-level reasoning_effort, Anthropic
+// nested under output_config.
+var knobWireNames = map[string][]string{
+	KNOBTEMPERATURE: {"temperature"},
+	KNOBEFFORT:      {"reasoning_effort", "effort"},
+}
+
+// explainKnobRejection annotates a provider error that looks like the refusal
+// of a knob this request carried, naming the knob, the model and where the
+// setting came from.
+//
+// This is the other half of not validating up front: the provider decides,
+// but its own message ("Unsupported parameter: 'temperature'") says nothing
+// about which config key to go and change. Wrapping it does.
+//
+// A knob only matches when it was actually configured AND the provider's text
+// mentions it, so an expired key or a rate limit is returned untouched rather
+// than blamed on a knob that had nothing to do with it.
+func explainKnobRejection(err error, model string, temperature *float64, effort string) error {
+	if err == nil {
+		return nil
+	}
+
+	configured := map[string]bool{
+		KNOBTEMPERATURE: temperature != nil,
+		KNOBEFFORT:      effort != "",
+	}
+
+	text := strings.ToLower(err.Error())
+	for _, knob := range []string{KNOBTEMPERATURE, KNOBEFFORT} {
+		if !configured[knob] {
+			continue
+		}
+		for _, name := range knobWireNames[knob] {
+			if !strings.Contains(text, name) {
+				continue
+			}
+			return fmt.Errorf("model %q rejected %q (set in the gpt config block): %w\n\nDrop the setting or pick a model that accepts it", model, knob, err)
 		}
 	}
-	return false
+
+	return err
 }
 
 // MaxTokens reports the configured reply ceiling. Zero means the provider

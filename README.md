@@ -203,24 +203,31 @@ An unknown provider name fails at `LoadConfig` time rather than on the first que
 
 Both providers removed the sampling parameters from their newest models and
 replaced them with a reasoning-effort dial, so the two knobs are very nearly
-mutually exclusive:
+mutually exclusive. As a rough guide, at the time of writing:
 
-|                          | `temperature` | `effort` |
-| ------------------------ | ------------- | -------- |
-| `gpt-3.5` / `gpt-4o`     | yes           | no       |
-| o-series / `gpt-5`       | no            | yes      |
-| `claude-3.x` / `haiku-4-5` | yes         | no       |
-| `claude-opus-5`          | no            | yes      |
+|                            | `temperature` | `effort` |
+| -------------------------- | ------------- | -------- |
+| `gpt-3.5` / `gpt-4o`       | yes           | no       |
+| o-series / `gpt-5`         | no            | yes      |
+| `claude-3.x` / `haiku-4-5` | yes           | no       |
+| `claude-opus-5`            | no            | yes      |
 
-There is no knob that works across the whole matrix, so setting one the chosen
-model rejects would be a 400 on the first Slack mention. Instead it fails at
-`LoadConfig` with a message naming the model:
+**That table is a hint, not a rule the agent enforces.** Nothing checks the
+pairing before sending. A list of which model takes which parameter is stale
+the day a provider ships a release, and a stale list is worse than none: it
+refuses a config that would have worked. The provider decides, and a rejection
+is reported with the knob named and the config key pointed at:
 
 ```
-Invalid llm configuration: model "claude-opus-5" does not accept temperature;
-it was removed on this model in favour of effort, so drop the temperature
-setting or pick an older model
+anthropic request failed: model "claude-opus-5" rejected "temperature"
+(set in the gpt config block): POST "/v1/messages": 400 Bad Request
+{"type":"error","error":{"message":"temperature: Extra inputs are not permitted"}}
+
+Drop the setting or pick a model that accepts it
 ```
+
+The request is not retried without the knob. A config asking for a temperature
+gets that temperature or an error, never a quietly different request.
 
 `temperature` is passed through **provider-native and is not rescaled**, so the
 same number means different things: OpenAI's range is 0–2 with a default of 1,
@@ -247,18 +254,21 @@ gpt:
   effort: "low"         # cheaper and faster on routine mentions
 ```
 
-Which models accept which knob is a pair of prefix tables — `claudeNoSampling`
-and `claudeEffort` in `gpt/claude.go`, `openaiReasoning` in `gpt/gpt.go`. They
-go stale whenever a provider ships a model, and they are the only place to edit
-when that happens.
+The level itself *is* checked at load, because `low|medium|high|xhigh|max` is a
+fixed vocabulary rather than a per-model capability — no provider release turns
+`"hihg"` into a valid value:
 
-To check from code rather than config, ask the provider:
+```
+Invalid llm configuration: invalid effort "hihg", expected one of low, medium, high, xhigh, max
+```
+
+Whether the chosen model accepts a valid level is still the provider's call.
+
+Setting the knobs from code skips the config entirely:
 
 ```go
 llm := a.NewLLM()
-if llm.Supports(gpt.KNOBEFFORT) {
-    llm.SetEffort(gpt.EFFORTLOW)
-}
+llm.SetEffort(gpt.EFFORTLOW)
 ```
 
 #### Asking a question

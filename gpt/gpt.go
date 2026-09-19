@@ -23,14 +23,6 @@ const (
 	MODELEMBEDDING = "text-embedding-3-small"
 )
 
-// openaiReasoning lists the model families that reject temperature and take
-// reasoning_effort instead. Everything else is the other way round: the chat
-// models take temperature and have no effort dial.
-//
-// Prefixes, so point releases are covered. This table goes stale every time
-// OpenAI ships a family; it is the only place to edit when they do.
-var openaiReasoning = []string{"o1", "o3", "o4", "gpt-5"}
-
 type GPTmessage struct {
 	Role    string `json:"role"`
 	Content string `json:"content"`
@@ -115,7 +107,7 @@ func (o *OpenAI) SetMaxTokens(maxTokens int64) {
 
 // SetTemperature sets the sampling temperature. OpenAI's range is 0-2 with a
 // default of 1, so a value ported straight from an Anthropic config means
-// something different here. The reasoning models reject it; see Supports.
+// something different here, and the reasoning models reject it outright.
 func (o *OpenAI) SetTemperature(temperature *float64) {
 	o.temperature = temperature
 }
@@ -126,21 +118,13 @@ func (o *OpenAI) SetEffort(effort string) {
 	o.effort = effort
 }
 
-// Supports reports whether the configured model accepts a knob.
-func (o *OpenAI) Supports(knob string) bool {
-	model := o.model
-	if model == "" {
-		model = MODELGPT35
+// modelOrDefault is the model this client will actually send, which is the
+// default whenever none was configured.
+func (o *OpenAI) modelOrDefault() string {
+	if o.model == "" {
+		return MODELGPT35
 	}
-
-	switch knob {
-	case KNOBTEMPERATURE:
-		return !hasAnyPrefix(model, openaiReasoning)
-	case KNOBEFFORT:
-		return hasAnyPrefix(model, openaiReasoning)
-	default:
-		return false
-	}
+	return o.model
 }
 
 // normaliseOpenAIStop maps OpenAI finish reasons onto the shared STOP* set.
@@ -192,8 +176,9 @@ func (o *OpenAI) Query(systemPrompt string, message string, context string) (*Re
 	if o.maxTokens > 0 {
 		data["max_tokens"] = o.maxTokens
 	}
-	// Both knobs stay off the request unless configured. ApplyKnobs has
-	// already refused any the model rejects, so no capability check here.
+	// Both knobs stay off the request unless configured, and go out as
+	// given: whether this model still accepts them is the API's call, and a
+	// refusal is explained on the way back out of post.
 	if o.temperature != nil {
 		data["temperature"] = *o.temperature
 	}
@@ -295,7 +280,12 @@ func (o *OpenAI) post(data map[string]interface{}) (*openaiResponse, error) {
 	}
 
 	if decoded.Error != nil {
-		return nil, fmt.Errorf("OpenAI API error: %s", decoded.Error.Message)
+		// Every request, single-turn and chat alike, comes through here, so
+		// this is the one place a knob rejection has to be recognised. The
+		// model is not checked before sending, which makes the 400 the first
+		// notice anyone gets that the pairing was wrong.
+		err := fmt.Errorf("OpenAI API error: %s", decoded.Error.Message)
+		return nil, explainKnobRejection(err, o.modelOrDefault(), o.temperature, o.effort)
 	}
 
 	return &decoded, nil

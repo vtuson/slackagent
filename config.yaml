@@ -35,14 +35,17 @@ gpt:
   max_tokens: 0
 
   # Optional tuning knobs. No model accepts both -- the newer models dropped
-  # temperature and took effort in its place -- so setting the wrong one for
-  # the chosen model is refused at startup rather than failing on first use.
+  # temperature and took effort in its place. Roughly, at time of writing:
   #
   #                        temperature   effort
   #   gpt-3.5 / gpt-4o         yes         no
   #   o-series / gpt-5         no          yes
   #   claude-3.x / haiku-4-5   yes         no
   #   claude-opus-5            no          yes
+  #
+  # Nothing checks this before sending: the table above would go stale with
+  # every provider release. Pick the wrong one and the first query fails with
+  # an error naming the knob and pointing back at this block.
 
   # Optional: sampling temperature. Passed through provider-native and NOT
   # rescaled, so the range differs: 0-2 on OpenAI (1 is its default), 0-1 on
