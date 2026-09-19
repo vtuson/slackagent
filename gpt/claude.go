@@ -151,15 +151,10 @@ func normaliseClaudeStop(reason anthropic.StopReason) string {
 	}
 }
 
-// Query sends a single-turn query and reports why generation stopped. The
-// system prompt maps onto Anthropic's top-level system field rather than a
-// message role, and any context is appended to the user turn.
-func (c *Claude) Query(systemPrompt string, message string, context string) (*Response, error) {
-	userText := message
-	if context != "" {
-		userText = message + "\n\n" + context
-	}
-
+// baseParams builds the half of a request that does not depend on the
+// conversation: model, ceiling and any configured knobs. Query and chat turns
+// share it so a knob cannot end up applied to one and not the other.
+func (c *Claude) baseParams() anthropic.MessageNewParams {
 	model := c.model
 	if model == "" {
 		model = MODELCLAUDE
@@ -173,12 +168,6 @@ func (c *Claude) Query(systemPrompt string, message string, context string) (*Re
 	params := anthropic.MessageNewParams{
 		Model:     anthropic.Model(model),
 		MaxTokens: maxTokens,
-		Messages: []anthropic.MessageParam{
-			anthropic.NewUserMessage(anthropic.NewTextBlock(userText)),
-		},
-	}
-	if systemPrompt != "" {
-		params.System = []anthropic.TextBlockParam{{Text: systemPrompt}}
 	}
 	// Both knobs are left off the request unless configured. ApplyKnobs has
 	// already refused any the model rejects, so no capability check here.
@@ -190,28 +179,117 @@ func (c *Claude) Query(systemPrompt string, message string, context string) (*Re
 			Effort: anthropic.OutputConfigEffort(c.effort),
 		}
 	}
+	return params
+}
+
+// claudeSystem wraps a system prompt in the block list the API expects. An
+// empty prompt gives nil, which leaves the field off the request.
+func claudeSystem(systemPrompt string) []anthropic.TextBlockParam {
+	if systemPrompt == "" {
+		return nil
+	}
+	return []anthropic.TextBlockParam{{Text: systemPrompt}}
+}
+
+// claudeTools converts the neutral tool definitions into Anthropic's shape.
+// The schema is passed through as the map it already is, rather than being
+// rebuilt field by field, so a schema from an MCP server survives intact.
+func claudeTools(tools []Tool) []anthropic.ToolUnionParam {
+	if len(tools) == 0 {
+		return nil
+	}
+
+	out := make([]anthropic.ToolUnionParam, 0, len(tools))
+	for _, t := range tools {
+		schema := anthropic.ToolInputSchemaParam{}
+		if t.InputSchema != nil {
+			if props, ok := t.InputSchema["properties"]; ok {
+				schema.Properties = props
+			}
+			if req, ok := t.InputSchema["required"].([]string); ok {
+				schema.Required = req
+			} else if req, ok := t.InputSchema["required"].([]any); ok {
+				// A schema decoded from JSON gives []any, not
+				// []string.
+				for _, r := range req {
+					if name, ok := r.(string); ok {
+						schema.Required = append(schema.Required, name)
+					}
+				}
+			}
+		}
+
+		tool := anthropic.ToolParam{
+			Name:        t.Name,
+			InputSchema: schema,
+		}
+		if t.Description != "" {
+			tool.Description = anthropic.String(t.Description)
+		}
+		out = append(out, anthropic.ToolUnionParam{OfTool: &tool})
+	}
+	return out
+}
+
+// claudeResponse converts an API message into the shared Response, pulling out
+// the reply text and any tool the model is asking for.
+func claudeResponse(msg *anthropic.Message) *Response {
+	out := &Response{
+		StopReason:    normaliseClaudeStop(msg.StopReason),
+		RawStopReason: string(msg.StopReason),
+	}
+	if msg.StopReason == anthropic.StopReasonRefusal {
+		out.Detail = msg.StopDetails.Explanation
+	}
+
+	for _, block := range msg.Content {
+		switch variant := block.AsAny().(type) {
+		case anthropic.TextBlock:
+			// A tool-use turn can carry a preamble before the
+			// call; keep the first block, as a plain reply only
+			// ever has one.
+			if out.Text == "" {
+				out.Text = variant.Text
+			}
+		case anthropic.ToolUseBlock:
+			out.ToolCalls = append(out.ToolCalls, ToolCall{
+				ID:   variant.ID,
+				Name: variant.Name,
+				// Input is json.RawMessage on the block, but
+				// the SDK only fills the raw JSON, so read it
+				// from the JSON view.
+				Input: []byte(variant.JSON.Input.Raw()),
+			})
+		}
+	}
+
+	return out
+}
+
+// Query sends a single-turn query and reports why generation stopped. The
+// system prompt maps onto Anthropic's top-level system field rather than a
+// message role, and any context is appended to the user turn.
+//
+// It offers no tools; a tool call needs a second request carrying the turn it
+// was asked in, which only NewChat can do.
+func (c *Claude) Query(systemPrompt string, message string, context string) (*Response, error) {
+	userText := message
+	if context != "" {
+		userText = message + "\n\n" + context
+	}
+
+	params := c.baseParams()
+	params.System = claudeSystem(systemPrompt)
+	params.Messages = []anthropic.MessageParam{
+		anthropic.NewUserMessage(anthropic.NewTextBlock(userText)),
+	}
 
 	resp, err := c.getClient().Messages.New(ctxBackground(), params)
 	if err != nil {
 		return nil, fmt.Errorf("anthropic request failed: %w", err)
 	}
 
-	out := &Response{
-		StopReason:    normaliseClaudeStop(resp.StopReason),
-		RawStopReason: string(resp.StopReason),
-	}
-	if resp.StopReason == anthropic.StopReasonRefusal {
-		out.Detail = resp.StopDetails.Explanation
-	}
-
-	for _, block := range resp.Content {
-		if text, ok := block.AsAny().(anthropic.TextBlock); ok {
-			out.Text = text.Text
-			break
-		}
-	}
-
-	return out, nil
+	return claudeResponse(resp), nil
 }
 
 // GptQuery returns just the reply text. Callers that need to react to the stop
@@ -238,4 +316,64 @@ func (c *Claude) GptQuery(systemPrompt string, message string, context string) (
 // later without changing the LLM interface.
 func ctxBackground() context.Context {
 	return context.Background()
+}
+
+// claudeChat is a Claude conversation. History is kept in the SDK's own
+// message type, so an assistant turn goes back to the API exactly as it came
+// out, tool_use blocks and all.
+type claudeChat struct {
+	c        *Claude
+	system   []anthropic.TextBlockParam
+	tools    []anthropic.ToolUnionParam
+	messages []anthropic.MessageParam
+}
+
+// NewChat starts a conversation with a fixed system prompt and tool set.
+func (c *Claude) NewChat(systemPrompt string, tools []Tool) Chat {
+	return &claudeChat{
+		c:      c,
+		system: claudeSystem(systemPrompt),
+		tools:  claudeTools(tools),
+	}
+}
+
+// Send adds a user message and returns the reply.
+func (ch *claudeChat) Send(message string) (*Response, error) {
+	ch.messages = append(ch.messages, anthropic.NewUserMessage(anthropic.NewTextBlock(message)))
+	return ch.send()
+}
+
+// SendToolResults answers the outstanding calls. They go back as a single user
+// turn: Anthropic rejects a turn that answers only some of them, and splitting
+// them over several turns is the same thing as far as the API is concerned.
+func (ch *claudeChat) SendToolResults(results []ToolResult) (*Response, error) {
+	if len(results) == 0 {
+		return nil, errors.New("no tool results to send")
+	}
+
+	blocks := make([]anthropic.ContentBlockParamUnion, 0, len(results))
+	for _, r := range results {
+		blocks = append(blocks, anthropic.NewToolResultBlock(r.ID, r.Content, r.IsError))
+	}
+	ch.messages = append(ch.messages, anthropic.NewUserMessage(blocks...))
+	return ch.send()
+}
+
+// send issues the request and records the reply, so the next turn carries it.
+func (ch *claudeChat) send() (*Response, error) {
+	params := ch.c.baseParams()
+	params.System = ch.system
+	params.Tools = ch.tools
+	params.Messages = ch.messages
+
+	resp, err := ch.c.getClient().Messages.New(ctxBackground(), params)
+	if err != nil {
+		return nil, fmt.Errorf("anthropic request failed: %w", err)
+	}
+
+	// The assistant turn is appended before the tools run: the results are
+	// only accepted alongside the turn that asked for them.
+	ch.messages = append(ch.messages, resp.ToParam())
+
+	return claudeResponse(resp), nil
 }

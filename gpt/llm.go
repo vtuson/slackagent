@@ -66,12 +66,23 @@ type Response struct {
 	// Detail carries any provider explanation, such as why a request was
 	// refused. It is usually empty.
 	Detail string
+	// ToolCalls holds the tools the model wants run. It is populated only
+	// when StopReason is STOPTOOLUSE, and only on a request that offered
+	// tools in the first place.
+	ToolCalls []ToolCall
 }
 
 // Truncated reports whether the reply was cut short by the token ceiling,
 // which is the signal to ask for a continuation.
 func (r *Response) Truncated() bool {
 	return r.StopReason == STOPMAXTOKENS
+}
+
+// WantsTool reports whether the model is waiting on a tool result. The reply
+// text, if any, is a preamble to the call rather than an answer, and the
+// conversation only continues once the results go back.
+func (r *Response) WantsTool() bool {
+	return r.StopReason == STOPTOOLUSE && len(r.ToolCalls) > 0
 }
 
 // LLM is the interface every chat provider implements.
@@ -104,6 +115,14 @@ type LLM interface {
 	// Supports reports whether the currently configured model accepts a
 	// knob, so callers can fail at startup rather than on first use.
 	Supports(knob string) bool
+	// NewChat starts a multi-turn conversation with a fixed system prompt
+	// and tool set. It is the only entry point that can carry tools,
+	// because answering a tool call needs a second request that still
+	// remembers the first; GptQuery and Query are single-turn and cannot.
+	// A nil or empty tool list is allowed and just makes it a plain chat.
+	//
+	// The knobs set on the provider apply to every turn of the chat.
+	NewChat(systemPrompt string, tools []Tool) Chat
 }
 
 // Both providers must satisfy LLM.

@@ -15,6 +15,7 @@ You bring a small `main.go` that plugs in your business logic (Slack and/or Mail
 - **Event filter** that forwards `app_mention` and plain `message` events for your processing
 - **LLM client** wrapper with a simple `GptQuery` API and sensible defaults, backed by either OpenAI or Anthropic
 - **Provider-neutral stop reasons** via `Query`, so continuation loops work the same on either provider
+- **Tool use** behind the same interface: hand the model a set of tool definitions, get back the calls it wants to make, and run the loop with `RunToolLoop` — MCP servers plug straight in
 - **Gmail** utilities for polling labeled messages and parsing bodies (plain and HTML)
 - **MCP client** with support for Streamable, SSE, and STDIO transports for Model Context Protocol integration
 - **Notion MCP** integration with specialized client for Notion's MCP implementation
@@ -24,12 +25,13 @@ You bring a small `main.go` that plugs in your business logic (Slack and/or Mail
 ### Repository layout
 
 - `agent/` — Core agent wiring: config loader, Slack client initialization, email loop, LLM factory, MCP integration
-  - `mcp.go` — Model Context Protocol client implementation with multiple transport options
+  - `mcp.go` — Model Context Protocol client implementation with multiple transport options, and the bridge that turns MCP tools into ones the LLM can call
   - `notionmcp.go` — Specialized Notion MCP client implementation
   - `headers.go` — HTTP header utilities for MCP clients
 - `slack/` — Slack client and helpers (`PostInChannel`, `PostInThread`, `GetThreadMessages`, `StripAtMention`, `AddText`)
-- `gpt/` — LLM helpers behind a common `LLM` interface (`GptQuery`, `Query`)
+- `gpt/` — LLM helpers behind a common `LLM` interface (`GptQuery`, `Query`, `NewChat`)
   - `llm.go` — The `LLM` interface, `Response` type, stop reasons, and the provider factory
+  - `tools.go` — Provider-neutral tool definitions, the `Chat` interface and `RunToolLoop`
   - `gpt.go` — OpenAI Chat Completions, plus embeddings (`GetEmbedding`, `GetEmbeddingsBatch`)
   - `claude.go` — Anthropic Messages API
 - `embedding/` — Embedding generation and RAG utilities (local ONNX models and OpenAI embeddings)
@@ -311,7 +313,73 @@ Providers spell stop reasons differently, so they are normalised onto a shared s
 
 `Query` and `GptQuery` differ in how they treat a refusal: `Query` reports it as data, so a loop can branch on it, while `GptQuery` returns an error.
 
-> **Note:** `Query` is single-turn — it does not carry message history. The loop above feeds the text so far back through the `context` argument, which is an approximation of a real continuation rather than resuming an assistant turn. It is enough to detect and react to truncation; if you need true multi-turn continuation, raise an issue and the interface can grow a history-carrying call.
+> **Note:** `Query` is single-turn — it does not carry message history. The loop above feeds the text so far back through the `context` argument, which is an approximation of a real continuation rather than resuming an assistant turn. It is enough to detect and react to truncation. For true multi-turn work, use `NewChat` below, which keeps the conversation.
+
+#### Tool use
+
+`gpt.STOPTOOLUSE` tells you the model wants to call a tool, but a tool call cannot be answered within a single request: the model asks, and the answer only reaches it on a second request that still carries the turn it asked in. That is what `NewChat` is for — `Query` and `GptQuery` are single-turn and cannot offer tools at all.
+
+```go
+chat := llm.NewChat("You are a helpful Slack bot.", []gpt.Tool{{
+    Name:        "get_page",
+    Description: "Fetch a page by name",
+    InputSchema: map[string]any{
+        "type":       "object",
+        "properties": map[string]any{"page": map[string]any{"type": "string"}},
+        "required":   []any{"page"},
+    },
+}})
+
+resp, err := gpt.RunToolLoop(chat, prompt, func(call gpt.ToolCall) gpt.ToolResult {
+    args, err := call.Arguments()
+    if err != nil {
+        return gpt.ToolResult{ID: call.ID, Content: err.Error(), IsError: true}
+    }
+    return gpt.ToolResult{ID: call.ID, Content: fetchPage(args["page"].(string))}
+}, 0)
+```
+
+`RunToolLoop` sends the message, runs whatever the model asks for, feeds the results back, and repeats until the model answers. Its last argument caps the number of tool rounds, so a model that keeps asking cannot bill forever; `0` means `gpt.DEFAULTTOOLTURNS`.
+
+To approve or inspect calls first, drive the `Chat` directly:
+
+```go
+resp, err := chat.Send(prompt)
+for resp.WantsTool() {
+    var results []gpt.ToolResult
+    for _, call := range resp.ToolCalls {
+        // decide whether to run it, then:
+        results = append(results, gpt.ToolResult{ID: call.ID, Content: output})
+    }
+    resp, err = chat.SendToolResults(results)
+}
+```
+
+Two rules the providers both enforce: every call in a reply must be answered, and they must all be answered in the same turn. Report a failed tool as `ToolResult{IsError: true}` rather than aborting — the model can read the message and try something else, which it cannot do if the conversation stops.
+
+| Type | Meaning |
+|---|---|
+| `gpt.Tool` | A tool offered to the model: name, description, and a JSON Schema for the arguments |
+| `gpt.ToolCall` | The model asking: `ID`, `Name`, and raw JSON `Input` (decode with `Arguments()`) |
+| `gpt.ToolResult` | What the tool produced, keyed by the call's `ID`, with `IsError` for failures |
+| `gpt.Chat` | The conversation: `Send` and `SendToolResults` |
+
+The wire formats differ and the differences are handled for you: Anthropic takes the schema at the top level and has an `is_error` flag, while OpenAI nests it under `function.parameters`, encodes arguments as a JSON string, and has no error flag (failures are prefixed into the content instead). Each provider keeps its own history in its native format, so an assistant turn goes back exactly as it arrived. A `Chat` is not safe for concurrent use — give each conversation its own.
+
+#### Tools from an MCP server
+
+An MCP server already publishes tool definitions with JSON Schemas, so no conversion is needed on your side:
+
+```go
+tools, err := a.MCPClient.Tools(ctx)
+if err != nil {
+    return err
+}
+chat := llm.NewChat(systemPrompt, tools)
+resp, err := gpt.RunToolLoop(chat, prompt, a.MCPClient.ToolRunner(ctx), 0)
+```
+
+`ToolRunner` dispatches each call to the server and packages the outcome, marking failures as errors for the model instead of returning them to you. Use `RunTool` if you want to dispatch a single call yourself.
 
 #### Embeddings are OpenAI-only
 

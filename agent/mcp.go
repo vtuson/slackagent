@@ -2,15 +2,18 @@ package agent
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log"
 	"net/http"
 	"os"
 	"os/exec"
+	"strings"
 	"sync"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
+	"github.com/vtuson/slackagent/gpt"
 )
 
 // MCPConnectionMethod identifies how to connect to an MCP server.
@@ -186,4 +189,93 @@ func ExtractTextResponses(res *mcp.CallToolResult) []string {
 		}
 	}
 	return texts
+}
+
+// Tools lists the server's tools in the provider-neutral form the gpt package
+// takes, ready to hand to LLM.NewChat. The JSON Schema each server publishes
+// is passed through untouched, so the model sees the same argument contract
+// the server will validate against.
+func (c *MCPClient) Tools(ctx context.Context) ([]gpt.Tool, error) {
+	tools, err := c.ListTools(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	out := make([]gpt.Tool, 0, len(tools))
+	for _, t := range tools {
+		schema, err := schemaToMap(t.InputSchema)
+		if err != nil {
+			return nil, fmt.Errorf("tool %q has an unreadable input schema: %w", t.Name, err)
+		}
+		out = append(out, gpt.Tool{
+			Name:        t.Name,
+			Description: t.Description,
+			InputSchema: schema,
+		})
+	}
+	return out, nil
+}
+
+// schemaToMap normalises a published schema into a map. The MCP client types
+// it as any, and what arrives depends on the transport, so it goes through
+// JSON rather than a type assertion.
+func schemaToMap(schema any) (map[string]any, error) {
+	if schema == nil {
+		return nil, nil
+	}
+	if m, ok := schema.(map[string]any); ok {
+		return m, nil
+	}
+
+	raw, err := json.Marshal(schema)
+	if err != nil {
+		return nil, err
+	}
+	var m map[string]any
+	if err := json.Unmarshal(raw, &m); err != nil {
+		return nil, err
+	}
+	return m, nil
+}
+
+// ToolRunner returns a runner that dispatches the model's tool calls to this
+// server, for use with gpt.RunToolLoop.
+func (c *MCPClient) ToolRunner(ctx context.Context) gpt.ToolFunc {
+	return func(call gpt.ToolCall) gpt.ToolResult {
+		return c.RunTool(ctx, call)
+	}
+}
+
+// RunTool runs one tool call and packages the outcome for the model.
+//
+// Failures come back as a result marked IsError rather than as a Go error: the
+// model can read "no such page" and try something else, which it cannot do if
+// the conversation stops. Only a broken session is worth aborting for, and
+// that shows up on the next turn anyway.
+func (c *MCPClient) RunTool(ctx context.Context, call gpt.ToolCall) gpt.ToolResult {
+	args, err := call.Arguments()
+	if err != nil {
+		return gpt.ToolResult{ID: call.ID, Content: err.Error(), IsError: true}
+	}
+
+	res, err := c.CallTool(ctx, call.Name, args)
+	if err != nil {
+		return gpt.ToolResult{ID: call.ID, Content: err.Error(), IsError: true}
+	}
+
+	content := strings.Join(ExtractTextResponses(res), "\n")
+	if content == "" && res.StructuredContent != nil {
+		// A tool that only returns structured output has no text
+		// blocks to join, so hand the model the JSON.
+		if raw, err := json.Marshal(res.StructuredContent); err == nil {
+			content = string(raw)
+		}
+	}
+	if content == "" {
+		// An empty result reads as a broken tool to the model, so say
+		// plainly that it did run.
+		content = "the tool returned no output"
+	}
+
+	return gpt.ToolResult{ID: call.ID, Content: content, IsError: res.IsError}
 }
