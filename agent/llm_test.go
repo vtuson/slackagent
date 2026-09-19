@@ -14,12 +14,20 @@ func newTestAgent(key, model, provider string) *Agent {
 
 func newTestAgentMaxTokens(key, model, provider string, maxTokens int64) *Agent {
 	cfg := &Config{}
-	cfg.GPT = &struct {
-		Key       string `yaml:"key"`
-		Model     string `yaml:"model"`
-		Provider  string `yaml:"provider,omitempty"`
-		MaxTokens int64  `yaml:"max_tokens,omitempty"`
-	}{Key: key, Model: model, Provider: provider, MaxTokens: maxTokens}
+	cfg.GPT = &GPTConfig{Key: key, Model: model, Provider: provider, MaxTokens: maxTokens}
+
+	return &Agent{Config: cfg}
+}
+
+func newTestAgentKnobs(key, model, provider string, temperature *float64, effort string) *Agent {
+	cfg := &Config{}
+	cfg.GPT = &GPTConfig{
+		Key:         key,
+		Model:       model,
+		Provider:    provider,
+		Temperature: temperature,
+		Effort:      effort,
+	}
 
 	return &Agent{Config: cfg}
 }
@@ -95,5 +103,35 @@ func TestNewLLMAppliesMaxTokens(t *testing.T) {
 	a = newTestAgentMaxTokens("k", "gpt-3.5-turbo", gpt.PROVIDEROPENAI, 512)
 	if got := a.NewLLM().(*gpt.OpenAI).MaxTokens(); got != 512 {
 		t.Errorf("openai max tokens = %d, want 512", got)
+	}
+}
+
+// temperature and effort from the config file must reach the provider.
+// The unsupported combinations are rejected by gpt.ApplyKnobs, which NewLLM
+// treats as fatal, so only the supported pairings are exercised here.
+func TestNewLLMAppliesKnobs(t *testing.T) {
+	a := newTestAgentKnobs("k", "claude-opus-5", gpt.PROVIDERANTHROPIC, nil, gpt.EFFORTMEDIUM)
+	if got := a.NewLLM().(*gpt.Claude).Effort(); got != gpt.EFFORTMEDIUM {
+		t.Errorf("claude effort = %q, want %q", got, gpt.EFFORTMEDIUM)
+	}
+
+	temp := 0.3
+	a = newTestAgentKnobs("k", "gpt-4o", gpt.PROVIDEROPENAI, &temp, "")
+	got := a.NewLLM().(*gpt.OpenAI).Temperature()
+	if got == nil || *got != temp {
+		t.Errorf("openai temperature = %v, want %v", got, temp)
+	}
+}
+
+// An absent temperature must stay absent rather than becoming zero, which
+// would quietly pin the model to its most deterministic setting.
+func TestNewLLMLeavesUnsetKnobsAlone(t *testing.T) {
+	a := newTestAgentKnobs("k", "gpt-4o", gpt.PROVIDEROPENAI, nil, "")
+	llm := a.NewLLM().(*gpt.OpenAI)
+	if llm.Temperature() != nil {
+		t.Errorf("temperature = %v, want nil", llm.Temperature())
+	}
+	if llm.Effort() != "" {
+		t.Errorf("effort = %q, want empty", llm.Effort())
 	}
 }

@@ -34,3 +34,23 @@ gpt:
   # (1024 for Anthropic, unset for OpenAI)
   max_tokens: 0
 
+  # Optional tuning knobs. No model accepts both -- the newer models dropped
+  # temperature and took effort in its place -- so setting the wrong one for
+  # the chosen model is refused at startup rather than failing on first use.
+  #
+  #                        temperature   effort
+  #   gpt-3.5 / gpt-4o         yes         no
+  #   o-series / gpt-5         no          yes
+  #   claude-3.x / haiku-4-5   yes         no
+  #   claude-opus-5            no          yes
+
+  # Optional: sampling temperature. Passed through provider-native and NOT
+  # rescaled, so the range differs: 0-2 on OpenAI (1 is its default), 0-1 on
+  # Anthropic. Omit the key to leave it unset -- that is different from 0,
+  # which is a real value asking for the most deterministic output.
+  # temperature: 0.7
+
+  # Optional: reasoning depth on models that support it. One of low, medium,
+  # high, xhigh, max. OpenAI stops at high. Omit to leave unset.
+  # effort: "medium"
+

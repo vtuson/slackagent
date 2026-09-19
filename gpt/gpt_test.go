@@ -178,3 +178,67 @@ func TestOpenAIMaxTokensOptional(t *testing.T) {
 		t.Errorf("max_tokens = %v, want 512", got)
 	}
 }
+
+// Neither knob may appear in the request unless it was configured.
+func TestOpenAIOmitsUnsetKnobs(t *testing.T) {
+	o, body, _ := newOpenAITestServer(t, openAIOK("ok"))
+
+	if _, err := o.GptQuery("", "hello", ""); err != nil {
+		t.Fatalf("GptQuery returned error: %v", err)
+	}
+
+	if _, present := (*body)["temperature"]; present {
+		t.Error("temperature was sent without being configured")
+	}
+	if _, present := (*body)["reasoning_effort"]; present {
+		t.Error("reasoning_effort was sent without being configured")
+	}
+}
+
+func TestOpenAISendsTemperature(t *testing.T) {
+	o, body, _ := newOpenAITestServer(t, openAIOK("ok"))
+	temp := 1.4 // above Anthropic's ceiling, valid on OpenAI's 0-2 range
+	o.SetTemperature(&temp)
+
+	if _, err := o.GptQuery("", "hello", ""); err != nil {
+		t.Fatalf("GptQuery returned error: %v", err)
+	}
+
+	if got := (*body)["temperature"]; got != 1.4 {
+		t.Errorf("temperature = %v, want 1.4", got)
+	}
+}
+
+func TestOpenAISendsZeroTemperature(t *testing.T) {
+	o, body, _ := newOpenAITestServer(t, openAIOK("ok"))
+	zero := 0.0
+	o.SetTemperature(&zero)
+
+	if _, err := o.GptQuery("", "hello", ""); err != nil {
+		t.Fatalf("GptQuery returned error: %v", err)
+	}
+
+	got, present := (*body)["temperature"]
+	if !present {
+		t.Fatal("temperature 0 never reached the request body")
+	}
+	if got != 0.0 {
+		t.Errorf("temperature = %v, want 0", got)
+	}
+}
+
+// OpenAI's chat completions endpoint takes effort as a top-level
+// reasoning_effort, unlike Anthropic's nested output_config.
+func TestOpenAISendsReasoningEffort(t *testing.T) {
+	o, body, _ := newOpenAITestServer(t, openAIOK("ok"))
+	o.SetModel("o3-mini")
+	o.SetEffort(EFFORTHIGH)
+
+	if _, err := o.GptQuery("", "hello", ""); err != nil {
+		t.Fatalf("GptQuery returned error: %v", err)
+	}
+
+	if got := (*body)["reasoning_effort"]; got != EFFORTHIGH {
+		t.Errorf("reasoning_effort = %v, want %q", got, EFFORTHIGH)
+	}
+}

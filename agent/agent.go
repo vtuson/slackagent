@@ -18,6 +18,24 @@ import (
 	"gopkg.in/yaml.v2"
 )
 
+// GPTConfig is the llm section of the config. It is a named type rather than
+// an inline struct so that adding a field does not break every caller that
+// constructs one.
+type GPTConfig struct {
+	Key      string `yaml:"key"`
+	Model    string `yaml:"model"`
+	Provider string `yaml:"provider,omitempty"`
+	// MaxTokens of 0 leaves the provider default.
+	MaxTokens int64 `yaml:"max_tokens,omitempty"`
+	// Temperature is a pointer so an explicit 0 (a request for deterministic
+	// output) is distinguishable from the key being absent. Not accepted by
+	// every model; LoadConfig refuses the combinations that would 400.
+	Temperature *float64 `yaml:"temperature,omitempty"`
+	// Effort is one of low, medium, high, xhigh, max. Empty leaves it unset.
+	// Only reasoning-capable models accept it.
+	Effort string `yaml:"effort,omitempty"`
+}
+
 // Config represents the YAML configuration structure
 type Config struct {
 	Slack *struct {
@@ -25,12 +43,7 @@ type Config struct {
 		AppToken string `yaml:"app_token,omitempty"`
 		Channel  string `yaml:"channel"`
 	} `yaml:"slack"`
-	GPT *struct {
-		Key       string `yaml:"key"`
-		Model     string `yaml:"model"`
-		Provider  string `yaml:"provider,omitempty"`
-		MaxTokens int64  `yaml:"max_tokens,omitempty"`
-	} `yaml:"gpt"`
+	GPT  *GPTConfig `yaml:"gpt"`
 	Mail *struct {
 		Label     string `yaml:"label"`
 		MaxID     string `yaml:"maxid,omitempty"`
@@ -106,7 +119,18 @@ func (a *Agent) LoadConfig(configPath string) error {
 			config.GPT.Provider = gpt.DetectProvider(config.GPT.Model)
 			log.Println("Using inferred llm provider: ", config.GPT.Provider)
 		}
-		if _, err := gpt.NewProvider(config.GPT.Provider, config.GPT.Key, config.GPT.Model); err != nil {
+		probe, err := gpt.NewProvider(config.GPT.Provider, config.GPT.Key, config.GPT.Model)
+		if err != nil {
+			log.Fatalf("Invalid llm configuration: %v", err)
+		}
+		// temperature and effort apply to different generations of model, so
+		// a config can easily name one the chosen model rejects. Catch it
+		// here, at load, rather than as a 400 on the first Slack mention.
+		model := config.GPT.Model
+		if model == "" {
+			model = gpt.GetDefaultModelFor(config.GPT.Provider)
+		}
+		if err := gpt.ApplyKnobs(probe, model, config.GPT.Temperature, config.GPT.Effort); err != nil {
 			log.Fatalf("Invalid llm configuration: %v", err)
 		}
 		a.gptApiKey = config.GPT.Key
@@ -204,6 +228,13 @@ func (a *Agent) NewLLM() gpt.LLM {
 	// An unset max_tokens leaves each provider on its own default.
 	if a.Config.GPT.MaxTokens > 0 {
 		llm.SetMaxTokens(a.Config.GPT.MaxTokens)
+	}
+
+	// temperature and effort apply to different generations of model, so a
+	// config can easily name one the chosen model rejects. Fail here, at
+	// startup, rather than letting it surface as a 400 on the first mention.
+	if err := gpt.ApplyKnobs(llm, a.Config.GPT.Model, a.Config.GPT.Temperature, a.Config.GPT.Effort); err != nil {
+		log.Fatalf("Invalid llm configuration: %v", err)
 	}
 
 	return llm
