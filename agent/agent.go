@@ -28,11 +28,16 @@ type GPTConfig struct {
 	// MaxTokens of 0 leaves the provider default.
 	MaxTokens int64 `yaml:"max_tokens,omitempty"`
 	// Temperature is a pointer so an explicit 0 (a request for deterministic
-	// output) is distinguishable from the key being absent. Not accepted by
-	// every model; LoadConfig refuses the combinations that would 400.
+	// output) is distinguishable from the key being absent.
+	//
+	// Not every model accepts it, and nothing here checks: pairing it with a
+	// model that dropped sampling fails on the first query, with an error
+	// naming this key. Keeping a list of which models take what would go
+	// stale with every provider release.
 	Temperature *float64 `yaml:"temperature,omitempty"`
 	// Effort is one of low, medium, high, xhigh, max. Empty leaves it unset.
-	// Only reasoning-capable models accept it.
+	// Only reasoning-capable models accept it, and as with Temperature that
+	// is the provider's to enforce; the level itself is checked at load.
 	Effort string `yaml:"effort,omitempty"`
 }
 
@@ -123,14 +128,10 @@ func (a *Agent) LoadConfig(configPath string) error {
 		if err != nil {
 			log.Fatalf("Invalid llm configuration: %v", err)
 		}
-		// temperature and effort apply to different generations of model, so
-		// a config can easily name one the chosen model rejects. Catch it
-		// here, at load, rather than as a 400 on the first Slack mention.
-		model := config.GPT.Model
-		if model == "" {
-			model = gpt.GetDefaultModelFor(config.GPT.Provider)
-		}
-		if err := gpt.ApplyKnobs(probe, model, config.GPT.Temperature, config.GPT.Effort); err != nil {
+		// Only the effort level is worth checking at load: whether the model
+		// accepts the knob at all is left to the provider, so a misspelled
+		// level is the one knob mistake that can still be caught here.
+		if err := gpt.ApplyKnobs(probe, config.GPT.Temperature, config.GPT.Effort); err != nil {
 			log.Fatalf("Invalid llm configuration: %v", err)
 		}
 		a.gptApiKey = config.GPT.Key
@@ -230,10 +231,10 @@ func (a *Agent) NewLLM() gpt.LLM {
 		llm.SetMaxTokens(a.Config.GPT.MaxTokens)
 	}
 
-	// temperature and effort apply to different generations of model, so a
-	// config can easily name one the chosen model rejects. Fail here, at
-	// startup, rather than letting it surface as a 400 on the first mention.
-	if err := gpt.ApplyKnobs(llm, a.Config.GPT.Model, a.Config.GPT.Temperature, a.Config.GPT.Effort); err != nil {
+	// The knobs go on as configured. A model that rejects one says so on the
+	// first query, in an error naming the config key; only an effort level
+	// that is not a level at all is refused here.
+	if err := gpt.ApplyKnobs(llm, a.Config.GPT.Temperature, a.Config.GPT.Effort); err != nil {
 		log.Fatalf("Invalid llm configuration: %v", err)
 	}
 

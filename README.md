@@ -15,6 +15,7 @@ You bring a small `main.go` that plugs in your business logic (Slack and/or Mail
 - **Event filter** that forwards `app_mention` and plain `message` events for your processing
 - **LLM client** wrapper with a simple `GptQuery` API and sensible defaults, backed by either OpenAI or Anthropic
 - **Provider-neutral stop reasons** via `Query`, so continuation loops work the same on either provider
+- **Tool use** behind the same interface: hand the model a set of tool definitions, get back the calls it wants to make, and run the loop with `RunToolLoop` — MCP servers plug straight in
 - **Gmail** utilities for polling labeled messages and parsing bodies (plain and HTML)
 - **MCP client** with support for Streamable, SSE, and STDIO transports for Model Context Protocol integration
 - **Notion MCP** integration with specialized client for Notion's MCP implementation
@@ -24,12 +25,13 @@ You bring a small `main.go` that plugs in your business logic (Slack and/or Mail
 ### Repository layout
 
 - `agent/` — Core agent wiring: config loader, Slack client initialization, email loop, LLM factory, MCP integration
-  - `mcp.go` — Model Context Protocol client implementation with multiple transport options
+  - `mcp.go` — Model Context Protocol client implementation with multiple transport options, and the bridge that turns MCP tools into ones the LLM can call
   - `notionmcp.go` — Specialized Notion MCP client implementation
   - `headers.go` — HTTP header utilities for MCP clients
 - `slack/` — Slack client and helpers (`PostInChannel`, `PostInThread`, `GetThreadMessages`, `StripAtMention`, `AddText`)
-- `gpt/` — LLM helpers behind a common `LLM` interface (`GptQuery`, `Query`)
+- `gpt/` — LLM helpers behind a common `LLM` interface (`GptQuery`, `Query`, `NewChat`)
   - `llm.go` — The `LLM` interface, `Response` type, stop reasons, and the provider factory
+  - `tools.go` — Provider-neutral tool definitions, the `Chat` interface and `RunToolLoop`
   - `gpt.go` — OpenAI Chat Completions, plus embeddings (`GetEmbedding`, `GetEmbeddingsBatch`)
   - `claude.go` — Anthropic Messages API
 - `embedding/` — Embedding generation and RAG utilities (local ONNX models and OpenAI embeddings)
@@ -201,24 +203,31 @@ An unknown provider name fails at `LoadConfig` time rather than on the first que
 
 Both providers removed the sampling parameters from their newest models and
 replaced them with a reasoning-effort dial, so the two knobs are very nearly
-mutually exclusive:
+mutually exclusive. As a rough guide, at the time of writing:
 
-|                          | `temperature` | `effort` |
-| ------------------------ | ------------- | -------- |
-| `gpt-3.5` / `gpt-4o`     | yes           | no       |
-| o-series / `gpt-5`       | no            | yes      |
-| `claude-3.x` / `haiku-4-5` | yes         | no       |
-| `claude-opus-5`          | no            | yes      |
+|                            | `temperature` | `effort` |
+| -------------------------- | ------------- | -------- |
+| `gpt-3.5` / `gpt-4o`       | yes           | no       |
+| o-series / `gpt-5`         | no            | yes      |
+| `claude-3.x` / `haiku-4-5` | yes           | no       |
+| `claude-opus-5`            | no            | yes      |
 
-There is no knob that works across the whole matrix, so setting one the chosen
-model rejects would be a 400 on the first Slack mention. Instead it fails at
-`LoadConfig` with a message naming the model:
+**That table is a hint, not a rule the agent enforces.** Nothing checks the
+pairing before sending. A list of which model takes which parameter is stale
+the day a provider ships a release, and a stale list is worse than none: it
+refuses a config that would have worked. The provider decides, and a rejection
+is reported with the knob named and the config key pointed at:
 
 ```
-Invalid llm configuration: model "claude-opus-5" does not accept temperature;
-it was removed on this model in favour of effort, so drop the temperature
-setting or pick an older model
+anthropic request failed: model "claude-opus-5" rejected "temperature"
+(set in the gpt config block): POST "/v1/messages": 400 Bad Request
+{"type":"error","error":{"message":"temperature: Extra inputs are not permitted"}}
+
+Drop the setting or pick a model that accepts it
 ```
+
+The request is not retried without the knob. A config asking for a temperature
+gets that temperature or an error, never a quietly different request.
 
 `temperature` is passed through **provider-native and is not rescaled**, so the
 same number means different things: OpenAI's range is 0–2 with a default of 1,
@@ -245,18 +254,21 @@ gpt:
   effort: "low"         # cheaper and faster on routine mentions
 ```
 
-Which models accept which knob is a pair of prefix tables — `claudeNoSampling`
-and `claudeEffort` in `gpt/claude.go`, `openaiReasoning` in `gpt/gpt.go`. They
-go stale whenever a provider ships a model, and they are the only place to edit
-when that happens.
+The level itself *is* checked at load, because `low|medium|high|xhigh|max` is a
+fixed vocabulary rather than a per-model capability — no provider release turns
+`"hihg"` into a valid value:
 
-To check from code rather than config, ask the provider:
+```
+Invalid llm configuration: invalid effort "hihg", expected one of low, medium, high, xhigh, max
+```
+
+Whether the chosen model accepts a valid level is still the provider's call.
+
+Setting the knobs from code skips the config entirely:
 
 ```go
 llm := a.NewLLM()
-if llm.Supports(gpt.KNOBEFFORT) {
-    llm.SetEffort(gpt.EFFORTLOW)
-}
+llm.SetEffort(gpt.EFFORTLOW)
 ```
 
 #### Asking a question
@@ -311,7 +323,73 @@ Providers spell stop reasons differently, so they are normalised onto a shared s
 
 `Query` and `GptQuery` differ in how they treat a refusal: `Query` reports it as data, so a loop can branch on it, while `GptQuery` returns an error.
 
-> **Note:** `Query` is single-turn — it does not carry message history. The loop above feeds the text so far back through the `context` argument, which is an approximation of a real continuation rather than resuming an assistant turn. It is enough to detect and react to truncation; if you need true multi-turn continuation, raise an issue and the interface can grow a history-carrying call.
+> **Note:** `Query` is single-turn — it does not carry message history. The loop above feeds the text so far back through the `context` argument, which is an approximation of a real continuation rather than resuming an assistant turn. It is enough to detect and react to truncation. For true multi-turn work, use `NewChat` below, which keeps the conversation.
+
+#### Tool use
+
+`gpt.STOPTOOLUSE` tells you the model wants to call a tool, but a tool call cannot be answered within a single request: the model asks, and the answer only reaches it on a second request that still carries the turn it asked in. That is what `NewChat` is for — `Query` and `GptQuery` are single-turn and cannot offer tools at all.
+
+```go
+chat := llm.NewChat("You are a helpful Slack bot.", []gpt.Tool{{
+    Name:        "get_page",
+    Description: "Fetch a page by name",
+    InputSchema: map[string]any{
+        "type":       "object",
+        "properties": map[string]any{"page": map[string]any{"type": "string"}},
+        "required":   []any{"page"},
+    },
+}})
+
+resp, err := gpt.RunToolLoop(chat, prompt, func(call gpt.ToolCall) gpt.ToolResult {
+    args, err := call.Arguments()
+    if err != nil {
+        return gpt.ToolResult{ID: call.ID, Content: err.Error(), IsError: true}
+    }
+    return gpt.ToolResult{ID: call.ID, Content: fetchPage(args["page"].(string))}
+}, 0)
+```
+
+`RunToolLoop` sends the message, runs whatever the model asks for, feeds the results back, and repeats until the model answers. Its last argument caps the number of tool rounds, so a model that keeps asking cannot bill forever; `0` means `gpt.DEFAULTTOOLTURNS`.
+
+To approve or inspect calls first, drive the `Chat` directly:
+
+```go
+resp, err := chat.Send(prompt)
+for resp.WantsTool() {
+    var results []gpt.ToolResult
+    for _, call := range resp.ToolCalls {
+        // decide whether to run it, then:
+        results = append(results, gpt.ToolResult{ID: call.ID, Content: output})
+    }
+    resp, err = chat.SendToolResults(results)
+}
+```
+
+Two rules the providers both enforce: every call in a reply must be answered, and they must all be answered in the same turn. Report a failed tool as `ToolResult{IsError: true}` rather than aborting — the model can read the message and try something else, which it cannot do if the conversation stops.
+
+| Type | Meaning |
+|---|---|
+| `gpt.Tool` | A tool offered to the model: name, description, and a JSON Schema for the arguments |
+| `gpt.ToolCall` | The model asking: `ID`, `Name`, and raw JSON `Input` (decode with `Arguments()`) |
+| `gpt.ToolResult` | What the tool produced, keyed by the call's `ID`, with `IsError` for failures |
+| `gpt.Chat` | The conversation: `Send` and `SendToolResults` |
+
+The wire formats differ and the differences are handled for you: Anthropic takes the schema at the top level and has an `is_error` flag, while OpenAI nests it under `function.parameters`, encodes arguments as a JSON string, and has no error flag (failures are prefixed into the content instead). Each provider keeps its own history in its native format, so an assistant turn goes back exactly as it arrived. A `Chat` is not safe for concurrent use — give each conversation its own.
+
+#### Tools from an MCP server
+
+An MCP server already publishes tool definitions with JSON Schemas, so no conversion is needed on your side:
+
+```go
+tools, err := a.MCPClient.Tools(ctx)
+if err != nil {
+    return err
+}
+chat := llm.NewChat(systemPrompt, tools)
+resp, err := gpt.RunToolLoop(chat, prompt, a.MCPClient.ToolRunner(ctx), 0)
+```
+
+`ToolRunner` dispatches each call to the server and packages the outcome, marking failures as errors for the model instead of returning them to you. Use `RunTool` if you want to dispatch a single call yourself.
 
 #### Embeddings are OpenAI-only
 

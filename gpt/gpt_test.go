@@ -5,6 +5,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 )
 
@@ -240,5 +241,65 @@ func TestOpenAISendsReasoningEffort(t *testing.T) {
 
 	if got := (*body)["reasoning_effort"]; got != EFFORTHIGH {
 		t.Errorf("reasoning_effort = %v, want %q", got, EFFORTHIGH)
+	}
+}
+
+// The real shape of the thing the capability table used to pre-empt: the
+// model rejects the knob, and the only place that can be explained is on the
+// way back out.
+func TestOpenAIExplainsRejectedTemperature(t *testing.T) {
+	o, _, _ := newOpenAITestServer(t, func(w http.ResponseWriter) {
+		w.WriteHeader(http.StatusBadRequest)
+		w.Write([]byte(`{"error":{"message":"Unsupported parameter: 'temperature' is not supported with this model.","type":"invalid_request_error"}}`))
+	})
+	o.SetModel("gpt-5")
+	temp := 0.7
+	o.SetTemperature(&temp)
+
+	_, err := o.Query("sys", "hello", "")
+	if err == nil {
+		t.Fatal("expected the rejection to surface as an error")
+	}
+	got := err.Error()
+	for _, want := range []string{`"gpt-5"`, `rejected "temperature"`, "gpt config block", "Unsupported parameter"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("error is missing %q:\n%s", want, got)
+		}
+	}
+}
+
+// Chat turns share post with Query, so this pins that they share the
+// explanation too.
+func TestOpenAIChatExplainsRejectedEffort(t *testing.T) {
+	o, _, _ := newOpenAITestServer(t, func(w http.ResponseWriter) {
+		w.WriteHeader(http.StatusBadRequest)
+		w.Write([]byte(`{"error":{"message":"Unrecognized request argument supplied: reasoning_effort","type":"invalid_request_error"}}`))
+	})
+	o.SetEffort(EFFORTHIGH)
+
+	_, err := o.NewChat("sys", nil).Send("hello")
+	if err == nil {
+		t.Fatal("expected the rejection to surface as an error")
+	}
+	if got := err.Error(); !strings.Contains(got, `rejected "effort"`) {
+		t.Errorf("a chat turn must explain the knob too:\n%s", got)
+	}
+}
+
+// An ordinary failure must not be dressed up as a knob problem.
+func TestOpenAILeavesUnrelatedErrorsAlone(t *testing.T) {
+	o, _, _ := newOpenAITestServer(t, func(w http.ResponseWriter) {
+		w.WriteHeader(http.StatusUnauthorized)
+		w.Write([]byte(`{"error":{"message":"Incorrect API key provided","type":"invalid_request_error"}}`))
+	})
+	temp := 0.7
+	o.SetTemperature(&temp)
+
+	_, err := o.Query("sys", "hello", "")
+	if err == nil {
+		t.Fatal("expected an error")
+	}
+	if strings.Contains(err.Error(), "gpt config block") {
+		t.Errorf("a bad key must not be blamed on temperature:\n%s", err)
 	}
 }

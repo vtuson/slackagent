@@ -414,3 +414,62 @@ func TestClaudeSendsZeroTemperature(t *testing.T) {
 		t.Errorf("temperature = %v, want 0", got)
 	}
 }
+
+// The real shape of the thing the capability tables used to pre-empt: the
+// model rejects the knob, and the only place that can be explained is on the
+// way back out.
+func TestClaudeExplainsRejectedTemperature(t *testing.T) {
+	c, _, _ := newClaudeTestServer(t, func(w http.ResponseWriter) {
+		w.WriteHeader(http.StatusBadRequest)
+		w.Write([]byte(`{"type":"error","error":{"type":"invalid_request_error","message":"temperature: Extra inputs are not permitted"}}`))
+	})
+	temp := 0.7
+	c.SetTemperature(&temp)
+
+	_, err := c.Query("sys", "hello", "")
+	if err == nil {
+		t.Fatal("expected the rejection to surface as an error")
+	}
+	got := err.Error()
+	for _, want := range []string{"anthropic request failed", `"claude-opus-5"`, `rejected "temperature"`, "gpt config block"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("error is missing %q:\n%s", want, got)
+		}
+	}
+}
+
+// A chat turn goes through a different call site than Query, so it needs the
+// same wrapper or a tool-using conversation loses the explanation.
+func TestClaudeChatExplainsRejectedEffort(t *testing.T) {
+	c, _, _ := newClaudeTestServer(t, func(w http.ResponseWriter) {
+		w.WriteHeader(http.StatusBadRequest)
+		w.Write([]byte(`{"type":"error","error":{"type":"invalid_request_error","message":"output_config.effort: unsupported value"}}`))
+	})
+	c.SetEffort(EFFORTMAX)
+
+	_, err := c.NewChat("sys", nil).Send("hello")
+	if err == nil {
+		t.Fatal("expected the rejection to surface as an error")
+	}
+	if got := err.Error(); !strings.Contains(got, `rejected "effort"`) {
+		t.Errorf("a chat turn must explain the knob too:\n%s", got)
+	}
+}
+
+// An ordinary failure must not be dressed up as a knob problem.
+func TestClaudeLeavesUnrelatedErrorsAlone(t *testing.T) {
+	c, _, _ := newClaudeTestServer(t, func(w http.ResponseWriter) {
+		w.WriteHeader(http.StatusUnauthorized)
+		w.Write([]byte(`{"type":"error","error":{"type":"authentication_error","message":"invalid x-api-key"}}`))
+	})
+	temp := 0.7
+	c.SetTemperature(&temp)
+
+	_, err := c.Query("sys", "hello", "")
+	if err == nil {
+		t.Fatal("expected an error")
+	}
+	if strings.Contains(err.Error(), "gpt config block") {
+		t.Errorf("a bad key must not be blamed on temperature:\n%s", err)
+	}
+}

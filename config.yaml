@@ -35,14 +35,17 @@ gpt:
   max_tokens: 0
 
   # Optional tuning knobs. No model accepts both -- the newer models dropped
-  # temperature and took effort in its place -- so setting the wrong one for
-  # the chosen model is refused at startup rather than failing on first use.
+  # temperature and took effort in its place. Roughly, at time of writing:
   #
   #                        temperature   effort
   #   gpt-3.5 / gpt-4o         yes         no
   #   o-series / gpt-5         no          yes
   #   claude-3.x / haiku-4-5   yes         no
   #   claude-opus-5            no          yes
+  #
+  # Nothing checks this before sending: the table above would go stale with
+  # every provider release. Pick the wrong one and the first query fails with
+  # an error naming the knob and pointing back at this block.
 
   # Optional: sampling temperature. Passed through provider-native and NOT
   # rescaled, so the range differs: 0-2 on OpenAI (1 is its default), 0-1 on
@@ -54,3 +57,47 @@ gpt:
   # high, xhigh, max. OpenAI stops at high. Omit to leave unset.
   # effort: "medium"
 
+# Optional: tools for the model to call.
+#
+# There is deliberately no tools: block here for the loader to read. A tool is
+# a name, a description, a JSON Schema and something that runs when the model
+# calls it -- the last part is code, and a tool defined in config without it
+# would be a promise the agent cannot keep. Tools reach the model through
+# llm.NewChat(systemPrompt, tools), and the usual source is an MCP server,
+# which publishes them in that shape already:
+#
+#   tools, err := a.MCPClient.Tools(ctx)
+#   chat := llm.NewChat(systemPrompt, tools)
+#   resp, err := gpt.RunToolLoop(chat, prompt, a.MCPClient.ToolRunner(ctx), 0)
+#
+# What does belong in config is whatever your app needs to build that client.
+# agent_config is free-form and passed through untouched, so keep the server
+# details under it and read them with a.GetCustomConfig(&cfg). The block below
+# is a sample of that, not a schema the agent enforces -- the field names are
+# yours to choose, as long as your struct tags match. See the tool use section
+# of the README.
+
+# agent_config:
+#   mcp:
+#     # How to reach the server: streamable, sse or stdio
+#     method: "streamable"
+#
+#     # For streamable and sse: the endpoint
+#     url: "https://mcp.notion.com/mcp"
+#
+#     # For stdio: the command to launch instead, and its arguments
+#     # command: "npx"
+#     # args: ["-y", "@notionhq/notion-mcp-server"]
+#
+#     # Who the agent says it is when it connects
+#     impl_name: "slackagent"
+#     impl_version: "v0.1.0"
+#
+#     # The server's own credential, if it wants one. Notion's goes out as a
+#     # bearer token; see NotionMCP for that wiring
+#     key: ""
+#
+#   # Optional: how many rounds of tool calls one reply may take before the
+#   # agent stops. 0 leaves gpt.DEFAULTTOOLTURNS, which is 10. The cap exists
+#   # because a model that keeps asking otherwise keeps billing
+#   max_tool_turns: 0

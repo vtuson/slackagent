@@ -8,8 +8,6 @@ import (
 	"io/ioutil"
 	"log"
 	"net/http"
-
-	gpt "github.com/ayush6624/go-chatgpt"
 )
 
 const (
@@ -18,17 +16,12 @@ const (
 	SYSTEMROLE     = "system"
 	USERROLE       = "user"
 	ASSISTANTROLE  = "assistant"
+	// TOOLROLE carries a tool result back to the model. Anthropic sends
+	// the same thing as a block inside a user turn.
+	TOOLROLE       = "tool"
 	MODELGPT35     = "gpt-3.5-turbo"
 	MODELEMBEDDING = "text-embedding-3-small"
 )
-
-// openaiReasoning lists the model families that reject temperature and take
-// reasoning_effort instead. Everything else is the other way round: the chat
-// models take temperature and have no effort dial.
-//
-// Prefixes, so point releases are covered. This table goes stale every time
-// OpenAI ships a family; it is the only place to edit when they do.
-var openaiReasoning = []string{"o1", "o3", "o4", "gpt-5"}
 
 type GPTmessage struct {
 	Role    string `json:"role"`
@@ -46,6 +39,37 @@ type OpenAI struct {
 	// way maxTokens does.
 	temperature *float64
 	effort      string
+}
+
+// openaiResponse is the slice of the chat completions response this package
+// reads. It replaces the go-chatgpt type, which has no tool_calls field and so
+// decoded a tool call as an empty reply.
+type openaiResponse struct {
+	Choices []struct {
+		// Message stays raw so the assistant turn can go back into the
+		// conversation byte for byte, tool calls and all.
+		Message      json.RawMessage `json:"message"`
+		FinishReason string          `json:"finish_reason"`
+	} `json:"choices"`
+	Error *struct {
+		Message string `json:"message"`
+	} `json:"error,omitempty"`
+}
+
+// openaiMessage is an assistant turn, decoded from the raw message above.
+type openaiMessage struct {
+	Role      string `json:"role"`
+	Content   string `json:"content"`
+	ToolCalls []struct {
+		ID       string `json:"id"`
+		Type     string `json:"type"`
+		Function struct {
+			Name string `json:"name"`
+			// Arguments is a JSON object encoded as a string,
+			// which is OpenAI's shape, not Anthropic's.
+			Arguments string `json:"arguments"`
+		} `json:"function"`
+	} `json:"tool_calls"`
 }
 
 // embeddingResponse represents the OpenAI embedding API response
@@ -83,7 +107,7 @@ func (o *OpenAI) SetMaxTokens(maxTokens int64) {
 
 // SetTemperature sets the sampling temperature. OpenAI's range is 0-2 with a
 // default of 1, so a value ported straight from an Anthropic config means
-// something different here. The reasoning models reject it; see Supports.
+// something different here, and the reasoning models reject it outright.
 func (o *OpenAI) SetTemperature(temperature *float64) {
 	o.temperature = temperature
 }
@@ -94,21 +118,13 @@ func (o *OpenAI) SetEffort(effort string) {
 	o.effort = effort
 }
 
-// Supports reports whether the configured model accepts a knob.
-func (o *OpenAI) Supports(knob string) bool {
-	model := o.model
-	if model == "" {
-		model = MODELGPT35
+// modelOrDefault is the model this client will actually send, which is the
+// default whenever none was configured.
+func (o *OpenAI) modelOrDefault() string {
+	if o.model == "" {
+		return MODELGPT35
 	}
-
-	switch knob {
-	case KNOBTEMPERATURE:
-		return !hasAnyPrefix(model, openaiReasoning)
-	case KNOBEFFORT:
-		return hasAnyPrefix(model, openaiReasoning)
-	default:
-		return false
-	}
+	return o.model
 }
 
 // normaliseOpenAIStop maps OpenAI finish reasons onto the shared STOP* set.
@@ -160,8 +176,9 @@ func (o *OpenAI) Query(systemPrompt string, message string, context string) (*Re
 	if o.maxTokens > 0 {
 		data["max_tokens"] = o.maxTokens
 	}
-	// Both knobs stay off the request unless configured. ApplyKnobs has
-	// already refused any the model rejects, so no capability check here.
+	// Both knobs stay off the request unless configured, and go out as
+	// given: whether this model still accepts them is the API's call, and a
+	// refusal is explained on the way back out of post.
 	if o.temperature != nil {
 		data["temperature"] = *o.temperature
 	}
@@ -185,8 +202,49 @@ func (o *OpenAI) GptQuery(systemPrompt string, message string, context string) (
 }
 
 func (o *OpenAI) gptSend(data map[string]interface{}) (*Response, error) {
+	resp, err := o.post(data)
+	if err != nil {
+		return nil, err
+	}
 
-	jsonData, _ := json.Marshal(data)
+	if len(resp.Choices) == 0 {
+		log.Printf("openai returned no choices\n")
+		return &Response{StopReason: STOPOTHER}, nil
+	}
+
+	choice := resp.Choices[0]
+	var msg openaiMessage
+	if err := json.Unmarshal(choice.Message, &msg); err != nil {
+		return nil, fmt.Errorf("failed to unmarshal assistant message: %w", err)
+	}
+
+	out := &Response{
+		Text:          msg.Content,
+		StopReason:    normaliseOpenAIStop(choice.FinishReason),
+		RawStopReason: choice.FinishReason,
+	}
+	for _, call := range msg.ToolCalls {
+		out.ToolCalls = append(out.ToolCalls, ToolCall{
+			ID:   call.ID,
+			Name: call.Function.Name,
+			// Arguments is JSON inside a string here, so the bytes
+			// of that string are the raw argument object.
+			Input: []byte(call.Function.Arguments),
+		})
+	}
+
+	return out, nil
+}
+
+// post sends a chat completions request and decodes the envelope. It is split
+// out from gptSend so a chat turn can read the raw assistant message and put
+// it back in the conversation unchanged.
+func (o *OpenAI) post(data map[string]interface{}) (*openaiResponse, error) {
+
+	jsonData, err := json.Marshal(data)
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal request: %w", err)
+	}
 
 	url := o.url
 	if url == "" {
@@ -215,24 +273,22 @@ func (o *OpenAI) gptSend(data map[string]interface{}) (*Response, error) {
 		return nil, err
 	}
 
-	var gptMesg gpt.ChatResponse
-	err = json.Unmarshal(respBody, &gptMesg)
-	if err != nil {
+	var decoded openaiResponse
+	if err := json.Unmarshal(respBody, &decoded); err != nil {
 		fmt.Printf("Error unmarshalling JSON: %v\n", err)
 		return nil, err
 	}
 
-	if len(gptMesg.Choices) == 0 {
-		log.Printf("openai returned no choices\n")
-		return &Response{StopReason: STOPOTHER}, nil
+	if decoded.Error != nil {
+		// Every request, single-turn and chat alike, comes through here, so
+		// this is the one place a knob rejection has to be recognised. The
+		// model is not checked before sending, which makes the 400 the first
+		// notice anyone gets that the pairing was wrong.
+		err := fmt.Errorf("OpenAI API error: %s", decoded.Error.Message)
+		return nil, explainKnobRejection(err, o.modelOrDefault(), o.temperature, o.effort)
 	}
 
-	choice := gptMesg.Choices[0]
-	return &Response{
-		Text:          choice.Message.Content,
-		StopReason:    normaliseOpenAIStop(choice.FinishReason),
-		RawStopReason: choice.FinishReason,
-	}, nil
+	return &decoded, nil
 }
 
 // GetEmbedding generates an embedding vector for the given text using OpenAI's embedding API
@@ -339,4 +395,141 @@ func (o *OpenAI) GetEmbeddingsBatch(texts []string) ([][]float32, error) {
 	}
 
 	return embeddings, nil
+}
+
+// openaiTools converts the neutral tool definitions into OpenAI's shape, which
+// nests everything under a function object rather than putting it at the top
+// level the way Anthropic does.
+func openaiTools(tools []Tool) []map[string]interface{} {
+	if len(tools) == 0 {
+		return nil
+	}
+
+	out := make([]map[string]interface{}, 0, len(tools))
+	for _, t := range tools {
+		schema := t.InputSchema
+		if schema == nil {
+			// A tool with no arguments still needs a schema; an
+			// object with no properties is the way to say that.
+			schema = map[string]interface{}{"type": "object", "properties": map[string]interface{}{}}
+		}
+		fn := map[string]interface{}{
+			"name":       t.Name,
+			"parameters": schema,
+		}
+		if t.Description != "" {
+			fn["description"] = t.Description
+		}
+		out = append(out, map[string]interface{}{
+			"type":     "function",
+			"function": fn,
+		})
+	}
+	return out
+}
+
+// openaiChat is an OpenAI conversation. Assistant turns are kept as the raw
+// JSON they arrived as, so a tool call goes back to the API exactly as it came
+// out rather than being rebuilt from parsed parts.
+type openaiChat struct {
+	o     *OpenAI
+	tools []map[string]interface{}
+	// messages holds map[string]interface{} for the turns this code writes
+	// and json.RawMessage for the assistant turns the API wrote.
+	messages []interface{}
+}
+
+// NewChat starts a conversation with a fixed system prompt and tool set.
+func (o *OpenAI) NewChat(systemPrompt string, tools []Tool) Chat {
+	ch := &openaiChat{o: o, tools: openaiTools(tools)}
+	if systemPrompt != "" {
+		ch.messages = append(ch.messages, GPTmessage{Role: SYSTEMROLE, Content: systemPrompt})
+	}
+	return ch
+}
+
+// Send adds a user message and returns the reply.
+func (ch *openaiChat) Send(message string) (*Response, error) {
+	ch.messages = append(ch.messages, GPTmessage{Role: USERROLE, Content: message})
+	return ch.send()
+}
+
+// SendToolResults answers the outstanding calls. Each result is its own tool
+// message, unlike Anthropic where they share one user turn, but they still all
+// have to go in the same request: OpenAI rejects the next completion if a call
+// is left unanswered.
+func (ch *openaiChat) SendToolResults(results []ToolResult) (*Response, error) {
+	if len(results) == 0 {
+		return nil, errors.New("no tool results to send")
+	}
+
+	for _, r := range results {
+		content := r.Content
+		if r.IsError {
+			// OpenAI has no is_error flag, so the only way to tell
+			// the model the call failed is in the content.
+			content = "Error: " + content
+		}
+		ch.messages = append(ch.messages, map[string]interface{}{
+			"role":         TOOLROLE,
+			"tool_call_id": r.ID,
+			"content":      content,
+		})
+	}
+
+	return ch.send()
+}
+
+// send issues the request and records the reply, so the next turn carries it.
+func (ch *openaiChat) send() (*Response, error) {
+	data := map[string]interface{}{
+		"model":    ch.o.model,
+		"messages": ch.messages,
+	}
+	if len(ch.tools) > 0 {
+		data["tools"] = ch.tools
+	}
+	if ch.o.maxTokens > 0 {
+		data["max_tokens"] = ch.o.maxTokens
+	}
+	if ch.o.temperature != nil {
+		data["temperature"] = *ch.o.temperature
+	}
+	if ch.o.effort != "" {
+		data["reasoning_effort"] = ch.o.effort
+	}
+
+	resp, err := ch.o.post(data)
+	if err != nil {
+		return nil, err
+	}
+	if len(resp.Choices) == 0 {
+		log.Printf("openai returned no choices\n")
+		return &Response{StopReason: STOPOTHER}, nil
+	}
+
+	choice := resp.Choices[0]
+	// The assistant turn is appended before the tools run: the results are
+	// only accepted alongside the turn that asked for them.
+	ch.messages = append(ch.messages, choice.Message)
+
+	var msg openaiMessage
+	if err := json.Unmarshal(choice.Message, &msg); err != nil {
+		return nil, fmt.Errorf("failed to unmarshal assistant message: %w", err)
+	}
+
+	out := &Response{
+		Text:          msg.Content,
+		StopReason:    normaliseOpenAIStop(choice.FinishReason),
+		RawStopReason: choice.FinishReason,
+	}
+	for _, call := range msg.ToolCalls {
+		out.ToolCalls = append(out.ToolCalls, ToolCall{
+			ID:    call.ID,
+			Name:  call.Function.Name,
+			Input: []byte(call.Function.Arguments),
+		})
+	}
+
+	return out, nil
 }
